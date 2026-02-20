@@ -6,12 +6,12 @@ use super::transport::UartTransport;
 
 const DEFAULT_TIMEOUT_MS: u32 = 500;
 
-pub struct CliProtocol<'d> {
-    transport: UartTransport<'d>,
+pub struct CliProtocol {
+    transport: UartTransport,
 }
 
-impl<'d> CliProtocol<'d> {
-    pub fn new(transport: UartTransport<'d>) -> Self {
+impl CliProtocol {
+    pub fn new(transport: UartTransport) -> Self {
         Self { transport }
     }
 
@@ -25,7 +25,7 @@ impl<'d> CliProtocol<'d> {
     }
 }
 
-impl<'d> FlipperProtocol for CliProtocol<'d> {
+impl FlipperProtocol for CliProtocol {
     fn execute_command(&mut self, command: &str) -> Result<String> {
         info!("Executing CLI command: {}", command);
         self.send_and_receive(command)

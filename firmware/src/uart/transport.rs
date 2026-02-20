@@ -8,15 +8,15 @@ use log::debug;
 const RX_BUF_SIZE: usize = 1024;
 const PROMPT: &[u8] = b">: ";
 
-pub struct UartTransport<'d> {
-    driver: UartDriver<'d>,
+pub struct UartTransport {
+    driver: UartDriver<'static>,
 }
 
-impl<'d> UartTransport<'d> {
+impl UartTransport {
     pub fn new(
-        uart: impl Peripheral<P = impl uart::Uart> + 'd,
-        tx: impl Peripheral<P = impl gpio::OutputPin> + 'd,
-        rx: impl Peripheral<P = impl gpio::InputPin> + 'd,
+        uart: impl Peripheral<P = impl uart::Uart> + 'static,
+        tx: impl Peripheral<P = impl gpio::OutputPin> + 'static,
+        rx: impl Peripheral<P = impl gpio::InputPin> + 'static,
         baud_rate: u32,
     ) -> Result<Self> {
         let config = uart::config::Config::default().baudrate(Hertz(baud_rate));

@@ -1,7 +1,9 @@
 mod config;
+mod mcp;
 mod uart;
 mod wifi;
 
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -57,8 +59,13 @@ fn main() -> Result<()> {
     // Step 7: Smoke tests — verify UART communication with Flipper
     run_smoke_tests(&mut protocol);
 
-    // Step 8: Main loop — keep firmware alive
-    info!("Firmware ready. Entering main loop.");
+    // Step 8: Start MCP HTTP server
+    let shared_protocol: Arc<Mutex<dyn FlipperProtocol>> = Arc::new(Mutex::new(protocol));
+    let mcp_server = Arc::new(mcp::McpServer::new(shared_protocol));
+    let _http = mcp::start_http_server(mcp_server)?;
+
+    // Step 9: Main loop — keep firmware alive (HTTP server runs in background threads)
+    info!("Firmware ready. MCP server listening on :8080");
     loop {
         thread::sleep(Duration::from_secs(30));
         info!("heartbeat — firmware alive");
