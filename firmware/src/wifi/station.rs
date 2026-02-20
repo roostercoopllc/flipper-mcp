@@ -14,7 +14,7 @@ pub fn connect_wifi(
     settings: &Settings,
 ) -> Result<BlockingWifi<EspWifi<'static>>> {
     if settings.wifi_ssid.is_empty() {
-        bail!("WiFi SSID is empty — configure via NVS or wifi-config.sh");
+        bail!("WiFi SSID is empty — create config.txt on Flipper SD card");
     }
 
     ensure!(settings.wifi_ssid.len() <= 32, "SSID too long (max 32 bytes)");

@@ -24,7 +24,7 @@ The ESP32-S2 runs an HTTP server implementing the MCP protocol. It translates MC
 
 - **~30 built-in tools** covering all default Flipper Zero applications
 - **Dynamic module discovery** — auto-detect FAP apps from SD card + TOML config-driven tools
-- **Dual WiFi mode** — connects to your network (STA) or creates its own hotspot (AP) with captive portal
+- **Flipper-first setup** — configure WiFi from the Flipper FAP (no phone, browser, or PC scripts needed)
 - **Dual MCP transport** — Streamable HTTP (modern) + Legacy SSE (backward compatible)
 - **Local discovery** — mDNS advertisement as `flipper-mcp.local`
 - **Remote access** — reverse WebSocket tunnel through a relay server (no port forwarding needed)
@@ -82,12 +82,19 @@ espflash flash --monitor target/xtensa-esp32s2-espidf/release/flipper-mcp
 ```
 
 ### 3. Configure WiFi
-On first boot, the Flipper creates a `FlipperMCP-XXXX` hotspot. Connect to it, enter your WiFi credentials in the captive portal, and the device reboots into station mode.
 
-Or pre-configure via script (writes to NVS before first boot):
-```bash
-./scripts/wifi-config.sh --ssid YourSSID --password YourPassword
+Create `config.txt` on the Flipper SD card at `SD:/apps_data/flipper_mcp/config.txt`:
+
+```ini
+wifi_ssid=YourNetworkName
+wifi_password=YourPassword
+device_name=flipper-mcp
 ```
+
+**Or configure directly from the Flipper** using the companion FAP (see Step 5):
+`Apps → Tools → Flipper MCP → Configure WiFi`
+
+On first boot without a config file, the ESP32 waits and writes `status=needs_config` to the status file. The Flipper FAP will display this on the Status screen.
 
 ### 4. Verify the server is working
 
@@ -128,12 +135,15 @@ The app appears in **Apps → Tools → Flipper MCP** and provides:
 
 | Screen | What it does |
 |--------|-------------|
-| **Status** | Shows WiFi IP, SSID, server state, firmware version |
-| **Start Server** | Brings the MCP HTTP server online |
-| **Stop Server** | Takes the MCP HTTP server offline |
-| **Restart Server** | Stops then starts — pick up config changes |
+| **Status** | Requests a fresh status update from the ESP32, shows IP, SSID, server state, version |
+| **Start / Stop / Restart** | Controls the MCP HTTP server lifecycle |
+| **Reboot Board** | Restarts the ESP32 WiFi Dev Board |
+| **Configure WiFi** | On-screen keyboard to enter SSID + password; writes `config.txt` to SD card |
+| **View Logs** | Scrollable diagnostic log written by the ESP32 every 30 s |
+| **Tools List** | Scrollable list of all MCP tools currently registered on the ESP32 |
+| **Refresh Modules** | Triggers FAP discovery rescan + `modules.toml` reload on the ESP32 |
 
-The app communicates via SD card files (no extra wiring beyond the standard GPIO header). The ESP32 writes a status file every 30 seconds; the Flipper app reads it on the Status screen.
+The app communicates via SD card files (no extra wiring beyond the GPIO header). **Configure WiFi** is the first-boot wizard — no phone, browser, or PC scripts required.
 
 ### 6. (Optional) Remote access via relay
 
@@ -141,7 +151,8 @@ The app communicates via SD card files (no extra wiring beyond the standard GPIO
 ```bash
 ./scripts/build-relay.sh
 ./target/release/flipper-mcp-relay --listen 0.0.0.0:9090
-./scripts/wifi-config.sh --ssid MySSID --password MyPass --relay ws://your-server:9090/tunnel
+# Then add relay_url to config.txt on the Flipper SD card:
+# relay_url=ws://your-server:9090/tunnel
 ```
 
 **Cloud deployment (AWS or GCP, with TLS + DNS):**

@@ -117,4 +117,16 @@ impl McpServer {
         self.tools.refresh_dynamic();
         success_response(id, json!({ "status": "refreshed" }))
     }
+
+    /// Refresh dynamic modules and return all tool names.
+    /// Called from the main loop when "refresh_modules" appears in server.cmd.
+    pub fn refresh_and_list_tools(&self) -> Vec<String> {
+        self.tools.refresh_dynamic();
+        self.tools.list_tool_names()
+    }
+
+    /// Return all current tool names without refreshing.
+    pub fn list_tool_names(&self) -> Vec<String> {
+        self.tools.list_tool_names()
+    }
 }

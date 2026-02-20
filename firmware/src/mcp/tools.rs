@@ -29,4 +29,12 @@ impl ToolRegistry {
     pub fn refresh_dynamic(&self) {
         self.modules.refresh();
     }
+
+    /// Return all tool names, sorted alphabetically, for writing to tools.txt on the Flipper SD.
+    pub fn list_tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> =
+            self.modules.list_all_tools().into_iter().map(|t| t.name).collect();
+        names.sort();
+        names
+    }
 }
