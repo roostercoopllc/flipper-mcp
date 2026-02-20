@@ -1,0 +1,15 @@
+# Rust requires larger main task stack than C (default is 3KB)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=20000
+
+# Default pthread stack size for std threads
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
+
+# System event loop stack
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# HTTP server — larger limits for MCP JSON-RPC payloads
+CONFIG_HTTPD_MAX_URI_LEN=1024
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+
+# FreeRTOS tick frequency — 1ms granularity for UART timeouts
+CONFIG_FREERTOS_HZ=1000
