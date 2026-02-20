@@ -9,6 +9,8 @@ use super::traits::FlipperModule;
 
 const MODULES_CONFIG_PATH: &str = "/ext/apps_data/flipper_mcp/modules.toml";
 
+use super::c_tool::CUSTOM_CODE_DIR;
+
 // ─── TOML schema ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -73,6 +75,65 @@ pub fn load_config_modules(protocol: &mut dyn FlipperProtocol) -> Vec<Box<dyn Fl
         modules.len(),
         modules.iter().map(|m| m.tools().len()).sum::<usize>()
     );
+    modules
+}
+
+/// Load per-tool TOML files from the `custom_code/` directory on the Flipper SD card.
+/// Each `*.toml` file was written by `c_tool::save_c_tool` and follows the same
+/// `[[module]]` format as `modules.toml`, so `build_dynamic_module` handles it directly.
+pub fn load_custom_code_modules(protocol: &mut dyn FlipperProtocol) -> Vec<Box<dyn FlipperModule>> {
+    let list_output = match protocol
+        .execute_command(&format!("storage list {}", CUSTOM_CODE_DIR))
+        .ok()
+    {
+        Some(out) => out,
+        None => return Vec::new(),
+    };
+
+    let trimmed = list_output.trim();
+    if trimmed.is_empty()
+        || trimmed.contains("Storage error")
+        || trimmed.contains("File not found")
+    {
+        return Vec::new();
+    }
+
+    let mut modules: Vec<Box<dyn FlipperModule>> = Vec::new();
+
+    for line in trimmed.lines() {
+        let line = line.trim();
+        // Flipper format: "[F] filename.toml"
+        let filename = match line.strip_prefix("[F] ") {
+            Some(n) => n.trim(),
+            None => continue,
+        };
+        if !filename.ends_with(".toml") {
+            continue;
+        }
+
+        let path = format!("{}/{}", CUSTOM_CODE_DIR, filename);
+        let raw = match protocol.execute_command(&format!("storage read {}", path)) {
+            Ok(out) => out,
+            Err(_) => continue,
+        };
+        let raw = raw.trim();
+        if raw.is_empty() || raw.contains("Storage error") || raw.contains("Error") {
+            continue;
+        }
+
+        let config: ModulesConfig = match toml::from_str(raw) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("Custom code: failed to parse {}: {}", path, e);
+                continue;
+            }
+        };
+        for m in config.module {
+            modules.push(Box::new(build_dynamic_module(m)));
+        }
+    }
+
+    log::info!("Custom code modules: loaded {} module(s)", modules.len());
     modules
 }
 

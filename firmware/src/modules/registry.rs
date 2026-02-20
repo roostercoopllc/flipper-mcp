@@ -7,6 +7,7 @@ use crate::mcp::types::{ToolDefinition, ToolResult};
 use crate::uart::FlipperProtocol;
 
 use super::builtin;
+use super::c_tool;
 use super::config;
 use super::discovery;
 use super::traits::FlipperModule;
@@ -50,6 +51,7 @@ impl ModuleRegistry {
 
         new_dynamic.extend(discovery::scan_fap_apps(&mut *proto));
         new_dynamic.extend(config::load_config_modules(&mut *proto));
+        new_dynamic.extend(config::load_custom_code_modules(&mut *proto));
 
         info!(
             "Dynamic modules refreshed: {} module(s), {} tool(s)",
@@ -89,13 +91,44 @@ impl ModuleRegistry {
             }),
         });
 
+        // Add the register_c_tool meta-tool
+        tools.push(ToolDefinition {
+            name: "register_c_tool".to_string(),
+            description: concat!(
+                "Register a new MCP tool by providing a pseudo-C function definition. ",
+                "The tool is saved to the Flipper SD card and immediately available. ",
+                "Format:\n",
+                "  // description: What the tool does\n",
+                "  void tool_name(string param1, integer param2) {\n",
+                "      // exec: cli command {param1} {param2}\n",
+                "      // optional: param2\n",
+                "  }\n",
+                "Supported param types: string, integer, boolean. ",
+                "All params are required unless marked with '// optional: name'. ",
+                "The '// exec:' line is the CLI command template with {param} placeholders."
+            ).to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The pseudo-C function definition"
+                    }
+                },
+                "required": ["code"]
+            }),
+        });
+
         tools
     }
 
     pub fn call_tool(&self, name: &str, args: &Value) -> ToolResult {
-        // Passthrough tool — no UART needed for param validation, but execute_command needs proto
+        // Special-dispatch tools — handled at registry level (need &self access to protocol + dynamic_modules)
         if name == "execute_command" {
             return self.execute_passthrough(args);
+        }
+        if name == "register_c_tool" {
+            return self.handle_register_c_tool(args);
         }
 
         // Search static modules (immutable, no dynamic lock needed)
@@ -133,5 +166,40 @@ impl ModuleRegistry {
             Ok(output) => ToolResult::success(output),
             Err(e) => ToolResult::error(format!("Command failed: {}", e)),
         }
+    }
+
+    /// Parse a pseudo-C function, save it to the Flipper SD card, and refresh the registry.
+    fn handle_register_c_tool(&self, args: &Value) -> ToolResult {
+        let code = match args.get("code").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return ToolResult::error("Missing required parameter: code"),
+        };
+
+        let parsed = match c_tool::parse_c_tool(code) {
+            Ok(p) => p,
+            Err(e) => return ToolResult::error(format!("Parse error: {}", e)),
+        };
+
+        let tool_name = parsed.name.clone();
+        let param_count = parsed.params.len();
+        let cmd_template = parsed.command_template.clone();
+
+        {
+            let mut protocol = self.protocol.lock().unwrap();
+            match c_tool::save_c_tool(&mut *protocol, &parsed, code) {
+                Ok((src, toml)) => {
+                    info!("Registered custom tool '{}': src={} toml={}", tool_name, src, toml);
+                }
+                Err(e) => return ToolResult::error(format!("Save failed: {}", e)),
+            }
+        }
+
+        // Refresh picks up the new TOML from custom_code/
+        self.refresh();
+
+        ToolResult::success(format!(
+            "Tool '{}' registered and active.\nCommand template: {}\nParameters: {}\nCall it like any other MCP tool.",
+            tool_name, cmd_template, param_count
+        ))
     }
 }
