@@ -136,12 +136,23 @@ The app appears in **Apps → Tools → Flipper MCP** and provides:
 The app communicates via SD card files (no extra wiring beyond the standard GPIO header). The ESP32 writes a status file every 30 seconds; the Flipper app reads it on the Status screen.
 
 ### 6. (Optional) Remote access via relay
+
+**Self-hosted (run the binary anywhere):**
 ```bash
 ./scripts/build-relay.sh
 ./target/release/flipper-mcp-relay --listen 0.0.0.0:9090
-# Then configure the relay URL on the device:
 ./scripts/wifi-config.sh --ssid MySSID --password MyPass --relay ws://your-server:9090/tunnel
 ```
+
+**Cloud deployment (AWS or GCP, with TLS + DNS):**
+```bash
+# Bootstrap state storage, then deploy
+./infra/bootstrap/aws.sh   # or ./infra/bootstrap/gcp.sh
+cd infra/aws && cp terraform.tfvars.example terraform.tfvars
+tofu init && tofu apply
+# Outputs the relay URL and a ready-to-paste wifi-config.sh command
+```
+See [RELAY.md](docs/RELAY.md#cloud-deployment-opentofu) for full instructions.
 
 ## Available Tools
 
@@ -167,6 +178,7 @@ flipper-mcp/
 ├── firmware/          # ESP32-S2 firmware (Rust, esp-idf-svc)
 ├── relay/             # Companion relay server (Rust, tokio/axum)
 ├── flipper-app/       # Flipper Zero FAP — in-device management UI (C, ufbt)
+├── infra/             # OpenTofu IaC — cloud relay deployment (AWS + GCP)
 ├── config/            # Example module configurations
 ├── scripts/           # Build, flash, and setup helper scripts
 └── docs/              # Architecture, setup, API, troubleshooting

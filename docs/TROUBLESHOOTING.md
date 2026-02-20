@@ -221,6 +221,135 @@ The Flipper tool took more than 30 seconds to respond. This is unusual — check
 
 ---
 
+## Cloud Deployment (OpenTofu) Issues
+
+### `tofu init` fails: `Failed to get existing workspaces: S3 bucket does not exist`
+The state backend bucket hasn't been created yet. Run the bootstrap script first:
+```bash
+# AWS
+./infra/bootstrap/aws.sh flipper-mcp-tfstate flipper-mcp-tflock us-east-1
+# GCP
+./infra/bootstrap/gcp.sh my-gcp-project my-project-tfstate us-central1
+```
+Then re-run `tofu init` with the `-backend-config` flags shown in `infra/*/terraform.tfvars.example`.
+
+### `tofu apply` fails with `AccessDenied` / permission errors
+The AWS IAM user or GCP service account running Tofu lacks required permissions.
+
+**AWS minimum permissions:**
+- `ec2:*`, `iam:*`, `route53:*`, `s3:*`, `dynamodb:*` (or use `AdministratorAccess` for initial setup, then lock down)
+
+**GCP minimum roles:**
+- `roles/compute.admin`, `roles/dns.admin`, `roles/storage.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`
+
+### Relay binary not found on first boot (`flipper-mcp-relay: not found`)
+The cloud-init user-data runs at first boot and downloads the binary from S3/GCS. If the binary hasn't been uploaded yet, the download silently fails and the service won't start.
+
+**Cause 1 — CI hasn't run yet.** Push a commit to `main` after setting up the GitHub secrets; the `publish-relay` job uploads the binary.
+
+**Cause 2 — GitHub secrets not configured.** Check **Settings → Secrets and variables → Actions** and ensure `AWS_ARTIFACTS_BUCKET` / `GCP_ARTIFACTS_BUCKET` (and credentials) are set.
+
+**Cause 3 — Manual upload needed.** You can upload directly:
+```bash
+# AWS
+cargo build --release -p flipper-mcp-relay
+aws s3 cp target/release/flipper-mcp-relay \
+  s3://<artifacts-bucket>/relay/flipper-mcp-relay
+
+# GCP
+gcloud storage cp target/release/flipper-mcp-relay \
+  gs://<artifacts-bucket>/relay/flipper-mcp-relay
+```
+
+After uploading, SSH into the server and run cloud-init again, or simply:
+```bash
+sudo aws s3 cp s3://<bucket>/relay/flipper-mcp-relay /usr/local/bin/flipper-mcp-relay
+sudo chmod +x /usr/local/bin/flipper-mcp-relay
+sudo systemctl start flipper-mcp-relay
+```
+
+### Caddy TLS certificate not provisioning
+
+Caddy uses Let's Encrypt HTTP-01 challenge (port 80). If the cert isn't issuing:
+
+1. **DNS not propagated yet.** After setting nameservers at your registrar, propagation can take up to an hour. Test with:
+   ```bash
+   dig +short relay.example.com     # should return your static IP
+   curl http://relay.example.com/health   # should respond before TLS works
+   ```
+
+2. **Port 80 not reachable.** The AWS security group and GCP firewall both allow port 80. If you modified them, verify:
+   ```bash
+   # AWS
+   aws ec2 describe-security-groups --filters Name=group-name,Values=flipper-mcp-relay
+   # GCP
+   gcloud compute firewall-rules describe flipper-mcp-relay-allow
+   ```
+
+3. **Caddy not running.** SSH in and check:
+   ```bash
+   sudo systemctl status caddy
+   sudo journalctl -u caddy -n 50
+   ```
+   If Caddy failed to start because the relay service wasn't bound yet, restart it after the relay is up:
+   ```bash
+   sudo systemctl restart caddy
+   ```
+
+### Health check returns 502 Bad Gateway
+
+Caddy is running but the relay process isn't bound on `localhost:9090`.
+```bash
+# SSH into server and check relay service
+sudo systemctl status flipper-mcp-relay
+sudo journalctl -u flipper-mcp-relay -n 50
+```
+
+Common causes: binary not downloaded (see above), or `ExecStart` path is wrong. Verify:
+```bash
+ls -la /usr/local/bin/flipper-mcp-relay
+/usr/local/bin/flipper-mcp-relay --help
+```
+
+### `tofu apply` creates new instance instead of updating
+
+`user_data_replace_on_change = true` (AWS) and `replace_triggered_by` (GCP) are set so that changing the cloud-init template forces instance replacement — cloud-init only runs on first boot. This is intentional. The new instance gets a new public IP, but the Elastic IP (AWS) or static address (GCP) is automatically reassociated.
+
+### EC2 instance is `t3.micro` but my account only has `t2.micro` free tier
+
+Older AWS accounts may only have `t2.micro` in the free tier. Change in `infra/aws/terraform.tfvars`:
+```hcl
+# Override instance type (set in compute.tf default)
+```
+Or directly edit `infra/aws/compute.tf` and change `instance_type = "t3.micro"` to `"t2.micro"`.
+
+### GCP `e2-micro` free tier availability
+
+The free tier `e2-micro` is available only in `us-central1`, `us-east1`, and `us-west1`. If you choose a different region, you'll be billed for the instance. Change `gcp_region` and `gcp_zone` in `terraform.tfvars` accordingly.
+
+### SSH: `Permission denied (publickey)`
+
+Verify the key in `terraform.tfvars` matches your local private key:
+```bash
+# AWS — check what key is registered
+ssh-keygen -y -f ~/.ssh/id_ed25519   # should match ssh_public_key in tfvars
+
+# GCP — check metadata
+gcloud compute instances describe flipper-mcp-relay \
+  --zone us-central1-a \
+  --format='value(metadata.items[ssh-keys])'
+```
+If the key is wrong, update `terraform.tfvars` and run `tofu apply` (the instance will be replaced).
+
+### CI `publish-relay` job: `Upload to S3` / `Upload to GCS` steps are skipped
+
+The steps are skipped when the corresponding bucket secret is empty. Check:
+1. The secret name is exactly `AWS_ARTIFACTS_BUCKET` (or `GCP_ARTIFACTS_BUCKET`)
+2. The secret is set at the **repository** level (not environment level), unless you've configured environment-scoped secrets
+3. The job only runs on push to `main` — PRs won't trigger it
+
+---
+
 ## Memory / Stack Issues
 
 ### Panic: `stack overflow`
