@@ -25,6 +25,11 @@ python3 --version  # must be ≥ 3.8
 
 ### 2. ufbt (micro Flipper Build Tool)
 ```bash
+# Kali / Debian / Ubuntu (managed Python environment — use pipx):
+pipx install ufbt
+pipx ensurepath && source ~/.zshrc   # add ~/.local/bin to PATH
+
+# Other systems:
 pip3 install ufbt
 ```
 
