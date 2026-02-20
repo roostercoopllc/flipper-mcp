@@ -1,0 +1,13 @@
+## IDF Component Manager manifest — declares managed component dependencies.
+## These are downloaded on the first build (requires internet access for the initial fetch;
+## the components are then cached in managed_components/).
+## See: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/tools/idf-component-manager.html
+
+dependencies:
+  idf: ">=5.2.0"
+
+  ## mDNS — local network device discovery (flipper-mcp.local)
+  espressif/mdns: ">=1.3.0"
+
+  ## WebSocket client — reverse tunnel to relay server
+  espressif/esp_websocket_client: ">=1.1.0"

@@ -1,6 +1,7 @@
 mod config;
 mod mcp;
 mod modules;
+mod tunnel;
 mod uart;
 mod wifi;
 
@@ -64,10 +65,17 @@ fn main() -> Result<()> {
             let shared_protocol: Arc<Mutex<dyn FlipperProtocol>> = Arc::new(Mutex::new(protocol));
             let mcp_server = Arc::new(mcp::McpServer::new(shared_protocol.clone()));
 
-            let mut manager = HttpServerManager::new(mcp_server);
+            let mut manager = HttpServerManager::new(mcp_server.clone());
             manager.start()?;
 
-            // Step 9: Main loop — poll Flipper SD card for server control commands
+            // Step 9: Advertise on local network via mDNS ({device_name}.local)
+            // The handle must stay alive to keep the advertisement running.
+            let _mdns = tunnel::start_mdns_if_available(&settings.device_name);
+
+            // Step 10: Start reverse WebSocket tunnel to relay (if relay_url is set)
+            tunnel::start_tunnel_if_available(&settings.relay_url, mcp_server);
+
+            // Step 11: Main loop — poll Flipper SD card for server control commands
             info!("Firmware ready. MCP server listening on :8080");
             loop {
                 thread::sleep(POLL_INTERVAL);

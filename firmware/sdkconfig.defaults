@@ -13,3 +13,9 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 
 # FreeRTOS tick frequency — 1ms granularity for UART timeouts
 CONFIG_FREERTOS_HZ=1000
+
+# mDNS — local network discovery (flipper-mcp.local)
+CONFIG_MDNS_ENABLED=y
+
+# WebSocket client — tunnel connection to relay server
+CONFIG_ESP_WEBSOCKET_CLIENT=y

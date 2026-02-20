@@ -1,5 +1,5 @@
 [workspace]
-members = ["firmware"]
+members = ["firmware", "relay"]
 resolver = "2"
 
 [profile.release]

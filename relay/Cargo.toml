@@ -1,0 +1,24 @@
+[package]
+name = "flipper-mcp-relay"
+version = "0.1.0"
+edition = "2021"
+description = "Relay server for cross-network Flipper MCP access"
+
+[[bin]]
+name = "flipper-mcp-relay"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dashmap = "6"
+uuid = { version = "1", features = ["v4"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }

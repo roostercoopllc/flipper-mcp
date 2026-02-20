@@ -84,9 +84,9 @@ espflash flash --monitor target/xtensa-esp32s2-espidf/release/flipper-mcp
 ### 3. Configure WiFi
 On first boot, the Flipper creates a `FlipperMCP-XXXX` hotspot. Connect to it, enter your WiFi credentials in the captive portal, and the device reboots into station mode.
 
-Or pre-configure:
+Or pre-configure via script (writes to NVS before first boot):
 ```bash
-./scripts/wifi-config.sh "YourSSID" "YourPassword"
+./scripts/wifi-config.sh --ssid YourSSID --password YourPassword
 ```
 
 ### 4. Connect an MCP client
@@ -118,8 +118,9 @@ echo "restart" > /path/to/sd/apps_data/flipper_mcp/server.cmd
 ```bash
 ./scripts/build-relay.sh
 ./target/release/flipper-mcp-relay --listen 0.0.0.0:9090
+# Then configure the relay URL on the device:
+./scripts/wifi-config.sh --ssid MySSID --password MyPass --relay ws://your-server:9090/tunnel
 ```
-Configure the Flipper with the relay URL and connect from anywhere.
 
 ## Available Tools
 

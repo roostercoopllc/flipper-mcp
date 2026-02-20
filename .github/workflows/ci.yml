@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Relay server ─────────────────────────────────────────────────────────────
+  relay:
+    name: Relay (stable Rust)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: relay-cargo-${{ runner.os }}-${{ hashFiles('relay/Cargo.toml') }}
+          restore-keys: relay-cargo-${{ runner.os }}-
+
+      - name: Cache relay build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: relay-target-${{ runner.os }}-${{ hashFiles('relay/Cargo.toml', 'relay/src/**') }}
+          restore-keys: relay-target-${{ runner.os }}-
+
+      - name: Check formatting
+        run: cargo fmt --package flipper-mcp-relay -- --check
+
+      - name: Clippy
+        run: cargo clippy --package flipper-mcp-relay -- -D warnings
+
+      - name: Build (release)
+        run: cargo build --release --package flipper-mcp-relay
+
+  # ── Firmware ─────────────────────────────────────────────────────────────────
+  firmware:
+    name: Firmware (ESP32-S2)
+    runs-on: ubuntu-latest
+    # Firmware builds are slow (ESP-IDF download); only run on push to main
+    # and on PRs that touch firmware/ or Cargo.toml files.
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.changed_files, 'firmware/'))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libssl-dev pkg-config python3-pip \
+            libusb-1.0-0-dev libudev-dev git wget flex bison \
+            gperf ccache cmake ninja-build libffi-dev libssl-dev \
+            dfu-util libusb-1.0-0
+
+      - name: Install Xtensa Rust toolchain
+        uses: esp-rs/xtensa-toolchain@v1
+        with:
+          default: true
+          version: latest
+          ldproxy: false
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: firmware-cargo-${{ runner.os }}-${{ hashFiles('firmware/Cargo.toml') }}
+          restore-keys: firmware-cargo-${{ runner.os }}-
+
+      - name: Cache ESP-IDF + embuild artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.embuild
+            firmware/target
+          key: firmware-espidf-${{ runner.os }}-${{ hashFiles('firmware/Cargo.toml', 'firmware/sdkconfig.defaults') }}
+          restore-keys: firmware-espidf-${{ runner.os }}-
+
+      - name: Build firmware (release)
+        working-directory: firmware
+        run: cargo build --release --target xtensa-esp32s2-espidf
+        env:
+          # Workaround: ESP-IDF v5.2.5 gdbinit.cmake bug (also set in .cargo/config.toml)
+          ESP_ROM_ELF_DIR: /dev/null
+
+      - name: Print binary size
+        working-directory: firmware
+        run: |
+          BIN=$(ls -1 target/xtensa-esp32s2-espidf/release/flipper-mcp 2>/dev/null | head -1)
+          if [[ -n "$BIN" ]]; then
+            SIZE=$(stat -c%s "$BIN")
+            echo "Binary size: $(( SIZE / 1024 )) KB (budget: 4096 KB)"
+            if (( SIZE > 4 * 1024 * 1024 )); then
+              echo "ERROR: Binary exceeds 4 MB flash budget!" && exit 1
+            fi
+          fi
+
+  # ── Summary check (required status for branch protection) ────────────────────
+  ci:
+    name: CI
+    needs: [relay, firmware]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          relay="${{ needs.relay.result }}"
+          firmware="${{ needs.firmware.result }}"
+          echo "relay: $relay"
+          echo "firmware: $firmware"
+          # firmware is allowed to be skipped (PR didn't touch firmware/)
+          if [[ "$relay" != "success" ]]; then
+            echo "Relay job did not succeed." && exit 1
+          fi
+          if [[ "$firmware" == "failure" || "$firmware" == "cancelled" ]]; then
+            echo "Firmware job failed." && exit 1
+          fi
+          echo "All required jobs passed."

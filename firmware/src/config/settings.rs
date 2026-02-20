@@ -12,6 +12,9 @@ pub struct Settings {
     pub wifi_password: String,
     pub uart_baud_rate: u32,
     pub device_name: String,
+    /// Optional WebSocket relay URL, e.g. `ws://relay.example.com:9090/tunnel`.
+    /// Empty string disables the tunnel.
+    pub relay_url: String,
 }
 
 impl Default for Settings {
@@ -21,6 +24,7 @@ impl Default for Settings {
             wifi_password: String::new(),
             uart_baud_rate: 115_200,
             device_name: "flipper-mcp".to_string(),
+            relay_url: String::new(),
         }
     }
 }
@@ -66,6 +70,10 @@ impl Settings {
                     "device_name" => {
                         self.device_name = value.to_string();
                         info!("SD config: device_name = {}", value);
+                    }
+                    "relay_url" => {
+                        self.relay_url = value.to_string();
+                        info!("SD config: relay_url set");
                     }
                     _ => {
                         warn!("SD config: unknown key: {}", key);
