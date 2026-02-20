@@ -89,8 +89,22 @@ Or pre-configure via script (writes to NVS before first boot):
 ./scripts/wifi-config.sh --ssid YourSSID --password YourPassword
 ```
 
-### 4. Connect an MCP client
-Add to your Claude Desktop config (`claude_desktop_config.json`):
+### 4. Verify the server is working
+
+Before configuring an AI client, confirm the server is reachable with curl:
+
+```bash
+# Quick health check
+curl http://flipper-mcp.local:8080/health
+
+# Full verification — initialize + list all available tools
+./scripts/test-connection.sh
+
+# If mDNS isn't resolving on your OS, pass the IP directly:
+./scripts/test-connection.sh 192.168.x.xxx
+```
+
+Then add to your Claude Desktop config (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
@@ -101,18 +115,25 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 }
 ```
 
-### 5. (Optional) Control the HTTP server from the Flipper
+### 5. Manage the WiFi board from the Flipper
 
-You can start, stop, or restart the MCP HTTP server by creating a command file on the Flipper's SD card:
+Install the companion **Flipper MCP** app from `flipper-app/` onto the Flipper Zero. Build with [ufbt](https://github.com/flipperdevices/flipperzero-ufbt) and copy the `.fap` to `SD:/apps/Tools/`:
 
-1. On the Flipper, navigate to: `SD Card → apps_data → flipper_mcp`
-2. Create a file named `server.cmd` containing one of: `stop`, `start`, or `restart`
-3. The ESP32 polls this file every 5 seconds, executes the command, and deletes the file
-
-You can also create the file from a PC by mounting the SD card:
 ```bash
-echo "restart" > /path/to/sd/apps_data/flipper_mcp/server.cmd
+cd flipper-app && ufbt   # produces flipper_mcp.fap
+# Copy flipper_mcp.fap to your Flipper SD card under apps/Tools/
 ```
+
+The app appears in **Apps → Tools → Flipper MCP** and provides:
+
+| Screen | What it does |
+|--------|-------------|
+| **Status** | Shows WiFi IP, SSID, server state, firmware version |
+| **Start Server** | Brings the MCP HTTP server online |
+| **Stop Server** | Takes the MCP HTTP server offline |
+| **Restart Server** | Stops then starts — pick up config changes |
+
+The app communicates via SD card files (no extra wiring beyond the standard GPIO header). The ESP32 writes a status file every 30 seconds; the Flipper app reads it on the Status screen.
 
 ### 6. (Optional) Remote access via relay
 ```bash
@@ -145,6 +166,7 @@ Custom tools can be added via TOML config files or by installing FAP apps on the
 flipper-mcp/
 ├── firmware/          # ESP32-S2 firmware (Rust, esp-idf-svc)
 ├── relay/             # Companion relay server (Rust, tokio/axum)
+├── flipper-app/       # Flipper Zero FAP — in-device management UI (C, ufbt)
 ├── config/            # Example module configurations
 ├── scripts/           # Build, flash, and setup helper scripts
 └── docs/              # Architecture, setup, API, troubleshooting

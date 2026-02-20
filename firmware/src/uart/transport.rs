@@ -73,6 +73,13 @@ impl UartTransport {
         Ok(text)
     }
 
+    /// Send raw bytes without appending \r\n — used for binary payloads (e.g. write_chunk data).
+    pub fn write_raw(&self, data: &[u8]) -> Result<()> {
+        self.driver.write(data).context("UART raw write failed")?;
+        self.driver.wait_tx_done(100).context("UART TX flush timeout")?;
+        Ok(())
+    }
+
     pub fn clear_rx(&self) -> Result<()> {
         self.driver.clear_rx().context("Failed to clear UART RX buffer")?;
         Ok(())

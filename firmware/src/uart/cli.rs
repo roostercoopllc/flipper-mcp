@@ -35,6 +35,31 @@ impl FlipperProtocol for CliProtocol {
         self.execute_command("device_info")
     }
 
+    fn write_file(&mut self, path: &str, content: &str) -> Result<()> {
+        // Best-effort: remove existing file so write_chunk starts fresh
+        let _ = self.execute_command(&format!("storage remove {}", path));
+
+        // Ensure the parent directory exists
+        if let Some(slash) = path.rfind('/') {
+            let dir = &path[..slash];
+            let _ = self.execute_command(&format!("storage mkdir {}", dir));
+        }
+
+        // Flush any stale RX bytes before the two-phase write
+        self.transport.clear_rx()?;
+
+        // Phase 1: send "storage write_chunk <path> <len>\r\n"
+        let cmd = format!("storage write_chunk {} {}\r\n", path, content.len());
+        self.transport.write_raw(cmd.as_bytes())?;
+
+        // Phase 2: immediately send the raw content bytes (no trailing \r\n)
+        self.transport.write_raw(content.as_bytes())?;
+
+        // Read the response (Flipper echoes back ">: " after writing)
+        let _ = self.transport.read_response(DEFAULT_TIMEOUT_MS);
+
+        Ok(())
+    }
 }
 
 fn strip_echo(response: &str, command: &str) -> String {

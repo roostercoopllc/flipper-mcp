@@ -1,0 +1,11 @@
+App(
+    appid="flipper_mcp",
+    name="Flipper MCP",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="flipper_mcp_app",
+    requires=["gui", "storage", "notification"],
+    sources=["flipper_mcp.c"],
+    fap_category="Tools",
+    fap_version=(1, 0),
+    fap_description="Manage the Flipper MCP WiFi board — view status, start/stop the MCP HTTP server.",
+)

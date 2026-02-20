@@ -17,11 +17,27 @@ else
     exit 1
 fi
 
+# Find espflash — prefer PATH, fall back to ~/.cargo/bin
+if command -v espflash &>/dev/null; then
+    ESPFLASH="espflash"
+elif [[ -x "$HOME/.cargo/bin/espflash" ]]; then
+    ESPFLASH="$HOME/.cargo/bin/espflash"
+else
+    echo "ERROR: espflash not found. Install with: cargo +stable install espflash" >&2
+    exit 1
+fi
+
 echo "Building firmware..."
 cd "$FIRMWARE_DIR"
 cargo build --release --target xtensa-esp32s2-espidf
 
+BIN="$(dirname "$FIRMWARE_DIR")/target/xtensa-esp32s2-espidf/release/flipper-mcp"
+
 echo ""
-echo "Flashing to device (opens serial monitor after flash)..."
-echo "Press Ctrl+R to reset, Ctrl+C to exit monitor."
-cargo run --release --target xtensa-esp32s2-espidf
+echo "Build complete. Now enter bootloader mode on the WiFi Dev Board:"
+echo "  Hold BOOT → tap RESET → release BOOT"
+echo ""
+read -r -p "Press Enter once /dev/ttyACM0 is ready (or Ctrl+C to cancel)..."
+echo ""
+echo "Flashing... (press Ctrl+C to exit monitor after flash)"
+"$ESPFLASH" flash --no-stub --monitor "$BIN"
