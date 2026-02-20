@@ -6,11 +6,15 @@ use log::info;
 
 use crate::mcp::server::McpServer;
 
+use super::sse::{new_sse_state, SseState};
 use super::streamable::start_http_server;
 
 pub struct HttpServerManager {
     server: Option<EspHttpServer<'static>>,
     mcp_server: Arc<McpServer>,
+    /// SSE session state persists across server restarts so in-flight sessions
+    /// aren't lost during a stop/start cycle.
+    sse_state: SseState,
 }
 
 impl HttpServerManager {
@@ -18,6 +22,7 @@ impl HttpServerManager {
         Self {
             server: None,
             mcp_server,
+            sse_state: new_sse_state(),
         }
     }
 
@@ -26,7 +31,7 @@ impl HttpServerManager {
             info!("HTTP server already running");
             return Ok(());
         }
-        self.server = Some(start_http_server(self.mcp_server.clone())?);
+        self.server = Some(start_http_server(self.mcp_server.clone(), self.sse_state.clone())?);
         info!("HTTP server started");
         Ok(())
     }

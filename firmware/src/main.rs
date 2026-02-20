@@ -18,6 +18,7 @@ use log::{error, info, warn};
 use config::NvsStorage;
 use mcp::transport::HttpServerManager;
 use uart::{CliProtocol, FlipperProtocol, UartTransport};
+use wifi::WifiOutcome;
 
 const SERVER_CMD_PATH: &str = "/ext/apps_data/flipper_mcp/server.cmd";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -53,55 +54,64 @@ fn main() -> Result<()> {
         info!("SD card config load skipped: {}", e);
     }
 
-    // Step 6: Connect WiFi STA
-    let _wifi = wifi::connect_wifi(
-        peripherals.modem,
-        sys_loop,
-        nvs_partition,
-        &settings,
-    )?;
+    // Step 6: Connect WiFi — STA if credentials present, else AP captive portal
+    match wifi::connect_or_ap(peripherals.modem, sys_loop, nvs_partition.clone(), &settings)? {
+        WifiOutcome::Connected(_wifi) => {
+            // Step 7: Smoke tests — verify UART communication with Flipper
+            run_smoke_tests(&mut protocol);
 
-    // Step 7: Smoke tests — verify UART communication with Flipper
-    run_smoke_tests(&mut protocol);
+            // Step 8: Create MCP server with module registry, start HTTP server
+            let shared_protocol: Arc<Mutex<dyn FlipperProtocol>> = Arc::new(Mutex::new(protocol));
+            let mcp_server = Arc::new(mcp::McpServer::new(shared_protocol.clone()));
 
-    // Step 8: Create MCP server with module registry, start HTTP server
-    let shared_protocol: Arc<Mutex<dyn FlipperProtocol>> = Arc::new(Mutex::new(protocol));
-    let mcp_server = Arc::new(mcp::McpServer::new(shared_protocol.clone()));
+            let mut manager = HttpServerManager::new(mcp_server);
+            manager.start()?;
 
-    let mut manager = HttpServerManager::new(mcp_server);
-    manager.start()?;
+            // Step 9: Main loop — poll Flipper SD card for server control commands
+            info!("Firmware ready. MCP server listening on :8080");
+            loop {
+                thread::sleep(POLL_INTERVAL);
 
-    // Step 9: Main loop — poll Flipper SD card for server control commands
-    info!("Firmware ready. MCP server listening on :8080");
-    loop {
-        thread::sleep(POLL_INTERVAL);
+                // Poll SD card for server control commands from the Flipper
+                let cmd = {
+                    let mut proto = shared_protocol.lock().unwrap();
+                    read_server_command(&mut *proto)
+                };
 
-        // Poll SD card for server control commands from the Flipper
-        let cmd = {
-            let mut proto = shared_protocol.lock().unwrap();
-            read_server_command(&mut *proto)
-        };
-
-        if let Some(cmd) = cmd {
-            info!("Server control command from Flipper: {}", cmd);
-            match cmd.as_str() {
-                "stop" => manager.stop(),
-                "start" => {
-                    if let Err(e) = manager.start() {
-                        error!("Failed to start HTTP server: {}", e);
+                if let Some(cmd) = cmd {
+                    info!("Server control command from Flipper: {}", cmd);
+                    match cmd.as_str() {
+                        "stop" => manager.stop(),
+                        "start" => {
+                            if let Err(e) = manager.start() {
+                                error!("Failed to start HTTP server: {}", e);
+                            }
+                        }
+                        "restart" => {
+                            if let Err(e) = manager.restart() {
+                                error!("Failed to restart HTTP server: {}", e);
+                            }
+                        }
+                        _ => warn!("Unknown server command: {}", cmd),
                     }
+
+                    // Remove the command file after processing
+                    let mut proto = shared_protocol.lock().unwrap();
+                    let _ = proto.execute_command(&format!("storage remove {}", SERVER_CMD_PATH));
                 }
-                "restart" => {
-                    if let Err(e) = manager.restart() {
-                        error!("Failed to restart HTTP server: {}", e);
-                    }
-                }
-                _ => warn!("Unknown server command: {}", cmd),
             }
-
-            // Remove the command file after processing
-            let mut proto = shared_protocol.lock().unwrap();
-            let _ = proto.execute_command(&format!("storage remove {}", SERVER_CMD_PATH));
+        }
+        WifiOutcome::AccessPoint(_wifi) => {
+            // AP mode — start captive portal server and block until the user
+            // configures WiFi credentials (portal handler will call esp_restart)
+            let _portal = wifi::ap::start_portal_server(nvs_partition)?;
+            info!(
+                "Captive portal running at http://{}. Waiting for WiFi configuration.",
+                wifi::ap::AP_IP
+            );
+            loop {
+                thread::sleep(Duration::from_secs(60));
+            }
         }
     }
 }

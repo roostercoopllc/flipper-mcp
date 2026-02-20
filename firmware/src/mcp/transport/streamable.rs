@@ -8,9 +8,11 @@ use log::info;
 
 use crate::mcp::server::McpServer;
 
+use super::sse::{register_sse_handlers, SseState};
+
 const MAX_REQUEST_BODY: usize = 16384; // 16KB
 
-pub fn start_http_server(server: Arc<McpServer>) -> Result<EspHttpServer<'static>> {
+pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<EspHttpServer<'static>> {
     let config = Configuration {
         http_port: 8080,
         stack_size: 10240,
@@ -21,10 +23,9 @@ pub fn start_http_server(server: Arc<McpServer>) -> Result<EspHttpServer<'static
     let mut http = EspHttpServer::new(&config).context("Failed to start HTTP server")?;
     info!("HTTP server starting on port 8080");
 
-    // POST /mcp — JSON-RPC requests
+    // POST /mcp — Streamable HTTP JSON-RPC requests
     let server_post = server.clone();
     http.fn_handler::<anyhow::Error, _>("/mcp", Method::Post, move |mut request| {
-        // Read request body
         let mut buf = [0u8; 4096];
         let mut body = Vec::new();
         loop {
@@ -51,7 +52,6 @@ pub fn start_http_server(server: Arc<McpServer>) -> Result<EspHttpServer<'static
                     .write_all(response_json.as_bytes())?;
             }
             None => {
-                // Notification — no response body
                 request.into_response(202, Some("Accepted"), &[])?;
             }
         }
@@ -60,7 +60,7 @@ pub fn start_http_server(server: Arc<McpServer>) -> Result<EspHttpServer<'static
     })
     .map_err(|e| anyhow::anyhow!("Failed to register POST /mcp: {e}"))?;
 
-    // GET /mcp — SSE not implemented yet
+    // GET /mcp — 405 (Streamable HTTP doesn't use GET /mcp for SSE)
     http.fn_handler::<anyhow::Error, _>("/mcp", Method::Get, |request| {
         request.into_response(405, Some("Method Not Allowed"), &[])?;
         Ok(())
@@ -80,6 +80,9 @@ pub fn start_http_server(server: Arc<McpServer>) -> Result<EspHttpServer<'static
     })
     .map_err(|e| anyhow::anyhow!("Failed to register GET /health: {e}"))?;
 
-    info!("HTTP server ready — POST /mcp, GET /health");
+    // Legacy SSE handlers: GET /sse and POST /messages
+    register_sse_handlers(&mut http, server, sse_state)?;
+
+    info!("HTTP server ready — POST /mcp, GET /health, GET /sse, POST /messages");
     Ok(http)
 }
