@@ -18,6 +18,7 @@ pub(super) struct DynamicTool {
 
 pub(super) struct DynamicModule {
     pub module_name: String,
+    #[allow(dead_code)]
     pub module_description: String,
     pub tools: Vec<DynamicTool>,
 }

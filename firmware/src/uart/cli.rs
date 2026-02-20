@@ -35,13 +35,6 @@ impl FlipperProtocol for CliProtocol {
         self.execute_command("device_info")
     }
 
-    fn list_apps(&mut self) -> Result<String> {
-        self.execute_command("loader list")
-    }
-
-    fn launch_app(&mut self, name: &str) -> Result<String> {
-        self.execute_command(&format!("loader open {}", name))
-    }
 }
 
 fn strip_echo(response: &str, command: &str) -> String {

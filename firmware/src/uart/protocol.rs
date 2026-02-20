@@ -5,7 +5,4 @@ pub trait FlipperProtocol: Send + Sync {
 
     fn get_device_info(&mut self) -> Result<String>;
 
-    fn list_apps(&mut self) -> Result<String>;
-
-    fn launch_app(&mut self, name: &str) -> Result<String>;
 }

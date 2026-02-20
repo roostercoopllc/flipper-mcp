@@ -49,6 +49,7 @@ impl HttpServerManager {
         self.start()
     }
 
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.server.is_some()
     }
