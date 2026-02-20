@@ -1,0 +1,45 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# ESP-IDF build artifacts
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+*.bin
+*.elf
+*.map
+
+# Sensitive / local configuration
+.env
+.env.*
+*.pem
+*.key
+*.crt
+wifi_credentials.toml
+nvs_partition.bin
+firmware/nvs_data.csv
+secrets.toml
+
+# Claude Code local settings
+.claude/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.iml
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Backup files
+*.bak
+*.orig
+*.tmp
