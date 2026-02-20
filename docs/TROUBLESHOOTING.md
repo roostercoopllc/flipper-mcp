@@ -36,29 +36,74 @@ Use `ensure!()` + `unwrap()` instead of `.context("…")?`.
 ## Flash Issues
 
 ### Device not detected / `No serial ports found`
+The WiFi Module v1 (ESP32-S2) uses **native USB CDC** and only enumerates when in bootloader
+mode. The running firmware uses UART (not USB), so the board won't appear as a serial port
+during normal operation.
+
+**Step 1 — Enter bootloader mode:**
+1. Connect the WiFi Module's USB-C to your PC (not the Flipper's port)
+2. Hold the **BOOT** button on the module
+3. Briefly tap **RESET**, then release **BOOT**
+4. The board should now appear as `/dev/ttyACM0`
+
+Verify:
 ```bash
-# Check if device is visible
-lsusb | grep -i silicon   # Should show Silicon Labs CP2102 or similar
-ls /dev/ttyUSB* /dev/ttyACM*
-
-# Add yourself to dialout group (requires logout)
-sudo usermod -a -G dialout $USER
-
-# Or flash with explicit port
-ESPFLASH_PORT=/dev/ttyUSB0 cargo run --release --target xtensa-esp32s2-espidf
+lsusb | grep -i espressif   # Should show: 303a:0002 Espressif
+ls /dev/ttyACM*             # Should show: /dev/ttyACM0
 ```
 
-Make sure you're connected to the **WiFi Dev Board's USB-C port**, not the Flipper's.
+**Step 2 — Flash immediately** (the bootloader has a short idle timeout):
+```bash
+~/.cargo/bin/espflash flash --no-stub --port /dev/ttyACM0 \
+  /home/atilla/Code/flipper-mcp/target/xtensa-esp32s2-espidf/release/flipper-mcp
+```
 
-### Flash fails with timeout
-Hold the **BOOT** button on the WiFi Dev Board while clicking **Reset**, or while plugging in USB.
+If you need to add yourself to the `dialout` group (required on some distros):
+```bash
+sudo usermod -a -G dialout $USER
+# Log out and back in for group to take effect
+```
+
+### `Communication error while flashing device` (flash stub failure)
+The default flash stub is sometimes incompatible. Use `--no-stub` to bypass it:
+```bash
+~/.cargo/bin/espflash flash --no-stub --port /dev/ttyACM0 \
+  /home/atilla/Code/flipper-mcp/target/xtensa-esp32s2-espidf/release/flipper-mcp
+```
+If that still fails, try erasing flash first:
+```bash
+~/.cargo/bin/espflash erase-flash --no-stub --port /dev/ttyACM0
+# then flash again
+```
+
+### Interactive prompts cause bootloader to time out
+`espflash` asks "Use serial port?" and "Remember?" on the first run. By the time you answer,
+the bootloader has timed out. Do BOOT+RESET again immediately before running the flash command.
+Subsequent runs skip the prompts (port is remembered), so only the first flash is affected.
 
 ### `espflash: command not found`
 ```bash
-cargo install espflash
-# Make sure ~/.cargo/bin is in PATH:
-export PATH="$HOME/.cargo/bin:$PATH"
+cargo +stable install espflash
 ```
+After install, `espflash` is in `~/.cargo/bin`. Either use the full path:
+```bash
+~/.cargo/bin/espflash flash ...
+```
+Or add `~/.cargo/bin` to your PATH permanently:
+```bash
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+### `No such file or directory` when specifying the binary path
+The workspace puts build artifacts under the **workspace root** `target/`, not `firmware/target/`.
+Always use the full path:
+```bash
+/home/atilla/Code/flipper-mcp/target/xtensa-esp32s2-espidf/release/flipper-mcp
+# or from the workspace root:
+target/xtensa-esp32s2-espidf/release/flipper-mcp
+```
+`cargo run --release` (from `firmware/`) handles this automatically via the `.cargo/config.toml` runner.
 
 ---
 
