@@ -95,6 +95,7 @@ typedef struct {
 
     char result[RESULT_BUF_LEN];
     char text_buf[TEXT_BUF_LEN];  /* current content for scroll_view */
+    char file_buf[512];           /* scratch buffer for file I/O — avoids large stack allocs */
     char scroll_title[32];         /* header shown on scroll_view */
 
     char ssid_buf[SSID_MAX_LEN];
@@ -146,11 +147,12 @@ static bool write_file_str(FlipperMcpApp* app, const char* path, const char* con
  * All fields (ip, ssid, server, uart_ok, relay, heap_free, …) are shown.
  */
 static void action_request_and_read_status(FlipperMcpApp* app) {
+    /* Fire "status" cmd so ESP32 will write a fresh file on its next poll cycle.
+     * We do NOT block here — blocking the GUI event thread for 2s caused crashes.
+     * The current file (written every 30s) is shown immediately. */
     write_file_str(app, CMD_FILE, "status");
-    furi_delay_ms(2000);
 
-    char raw[512];
-    uint16_t n = read_file_to_buf(app, STATUS_FILE, raw, sizeof(raw));
+    uint16_t n = read_file_to_buf(app, STATUS_FILE, app->file_buf, sizeof(app->file_buf));
 
     strncpy(app->scroll_title, "Status", sizeof(app->scroll_title) - 1);
     app->scroll_offset = 0;
@@ -165,7 +167,7 @@ static void action_request_and_read_status(FlipperMcpApp* app) {
 
     /* Format "key=value\n" lines as "key: value\n" */
     app->text_buf[0] = '\0';
-    char* p = raw;
+    char* p = app->file_buf;
     size_t out_pos = 0;
     while(*p && out_pos + 32 < TEXT_BUF_LEN) {
         char* nl = strchr(p, '\n');
@@ -265,11 +267,10 @@ static void action_load_tools(FlipperMcpApp* app) {
  * Password is intentionally left blank for security.
  */
 static void action_prefill_config(FlipperMcpApp* app) {
-    char existing[512];
-    read_file_to_buf(app, CONFIG_FILE, existing, sizeof(existing));
+    read_file_to_buf(app, CONFIG_FILE, app->file_buf, sizeof(app->file_buf));
     app->ssid_buf[0]  = '\0';
     app->relay_buf[0] = '\0';
-    char* p = existing;
+    char* p = app->file_buf;
     while(*p) {
         char* nl = strchr(p, '\n');
         if(nl) *nl = '\0';
@@ -288,15 +289,14 @@ static void action_prefill_config(FlipperMcpApp* app) {
  * relay_url may be empty — the ESP32 treats an empty value as "relay disabled".
  */
 static void action_save_config(FlipperMcpApp* app) {
-    char content[300];
     snprintf(
-        content,
-        sizeof(content),
+        app->file_buf,
+        sizeof(app->file_buf),
         "wifi_ssid=%s\nwifi_password=%s\nrelay_url=%s\n",
         app->ssid_buf,
         app->pass_buf,
         app->relay_buf);
-    bool ok = write_file_str(app, CONFIG_FILE, content);
+    bool ok = write_file_str(app, CONFIG_FILE, app->file_buf);
     if(ok) {
         strncpy(
             app->result,
