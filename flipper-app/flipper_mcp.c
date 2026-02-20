@@ -131,8 +131,8 @@ static void draw_status(Canvas* canvas, FlipperMcpApp* app) {
         char* eq = strchr(line, '=');
         if(eq) {
             *eq = '\0';
-            char pretty[64];
-            snprintf(pretty, sizeof(pretty), "%s: %s", line, eq + 1);
+            char pretty[128];
+            snprintf(pretty, sizeof(pretty), "%.24s: %.96s", line, eq + 1);
             canvas_draw_str(canvas, 2, y, pretty);
             y += 10;
         }

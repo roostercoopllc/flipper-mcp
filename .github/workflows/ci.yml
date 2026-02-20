@@ -117,6 +117,62 @@ jobs:
             fi
           fi
 
+  # ── Publish relay binary to S3 + GCS (push to main only) ────────────────────
+  publish-relay:
+    name: Publish Relay Binary
+    needs: relay
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache relay build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: relay-target-${{ runner.os }}-${{ hashFiles('relay/Cargo.toml', 'relay/src/**') }}
+          restore-keys: relay-target-${{ runner.os }}-
+
+      - name: Build relay (release)
+        run: cargo build --release --package flipper-mcp-relay
+
+      # Determine which cloud secrets are configured (secrets context is not
+      # available in `if` expressions, so we gate via step outputs instead).
+      - name: Check which cloud secrets are configured
+        id: clouds
+        run: |
+          [[ -n "$AWS_BUCKET" ]]  && echo "has_aws=true"  >> "$GITHUB_OUTPUT" || echo "has_aws=false"  >> "$GITHUB_OUTPUT"
+          [[ -n "$GCP_SA_KEY" ]]  && echo "has_gcp=true"  >> "$GITHUB_OUTPUT" || echo "has_gcp=false"  >> "$GITHUB_OUTPUT"
+        env:
+          AWS_BUCKET:  ${{ secrets.AWS_ARTIFACTS_BUCKET }}
+          GCP_SA_KEY:  ${{ secrets.GCP_SA_KEY }}
+
+      # Upload to S3 — skipped if AWS secrets are not configured
+      - name: Upload to S3
+        if: steps.clouds.outputs.has_aws == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          AWS_ARTIFACTS_BUCKET: ${{ secrets.AWS_ARTIFACTS_BUCKET }}
+        run: |
+          aws s3 cp target/release/flipper-mcp-relay \
+            "s3://$AWS_ARTIFACTS_BUCKET/relay/flipper-mcp-relay" \
+            --content-type application/octet-stream
+
+      # Upload to GCS — skipped if GCP secrets are not configured
+      - name: Upload to GCS
+        if: steps.clouds.outputs.has_gcp == 'true'
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          credentials: ${{ secrets.GCP_SA_KEY }}
+          path: target/release/flipper-mcp-relay
+          destination: ${{ secrets.GCP_ARTIFACTS_BUCKET }}/relay/
+
   # ── Summary check (required status for branch protection) ────────────────────
   ci:
     name: CI

@@ -1,0 +1,26 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# Never commit terraform.tfvars — it contains sensitive information.
+
+# GCP project ID (gcloud config get-value project)
+gcp_project = "my-gcp-project"
+
+# GCP region and zone
+gcp_region = "us-central1"
+gcp_zone   = "us-central1-a"
+
+# Cloud DNS zone resource name (GCP identifier, no dots — use hyphens)
+dns_zone_name = "example-com"
+
+# Apex domain for the DNS zone (with trailing dot)
+dns_domain = "example.com."
+
+# Subdomain for the relay. Relay will be at https://relay.example.com
+relay_subdomain = "relay"
+
+# SSH public key in GCP metadata format: "username:key-material"
+# (cat ~/.ssh/id_ed25519.pub and prepend "ubuntu:")
+ssh_public_key = "ubuntu:ssh-ed25519 AAAA... you@host"
+
+# GCS bucket name for relay binary artifacts (must be globally unique)
+# CI uploads to: gs://<artifacts_bucket>/relay/flipper-mcp-relay
+artifacts_bucket = "myorg-flipper-mcp-artifacts"
