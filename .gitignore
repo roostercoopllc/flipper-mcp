@@ -13,16 +13,21 @@ sdkconfig.old
 *.elf
 *.map
 
-# Sensitive / local configuration
+# Sensitive / local configuration — NEVER commit these
 .env
 .env.*
 *.pem
 *.key
 *.crt
 wifi_credentials.toml
+secrets.toml
+# NVS partition images and CSVs may contain WiFi credentials/passwords
+nvs*.bin
+nvs*.csv
+*_nvs.bin
+*_nvs.csv
 nvs_partition.bin
 firmware/nvs_data.csv
-secrets.toml
 
 # Claude Code local settings
 .claude/

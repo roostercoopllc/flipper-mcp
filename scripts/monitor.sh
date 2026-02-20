@@ -5,8 +5,18 @@ set -euo pipefail
 
 PORT="${1:-}"  # optional: override port, e.g. scripts/monitor.sh /dev/ttyUSB1
 
-if [[ -n "$PORT" ]]; then
-    espflash monitor "$PORT"
+# Find espflash — prefer PATH, fall back to ~/.cargo/bin
+if command -v espflash &>/dev/null; then
+    ESPFLASH="espflash"
+elif [[ -x "$HOME/.cargo/bin/espflash" ]]; then
+    ESPFLASH="$HOME/.cargo/bin/espflash"
 else
-    espflash monitor
+    echo "ERROR: espflash not found. Install with: cargo +stable install espflash" >&2
+    exit 1
+fi
+
+if [[ -n "$PORT" ]]; then
+    "$ESPFLASH" monitor "$PORT"
+else
+    "$ESPFLASH" monitor
 fi

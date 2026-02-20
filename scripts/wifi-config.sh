@@ -40,6 +40,16 @@ if ! command -v python3 &>/dev/null; then
     echo "ERROR: python3 required" >&2; exit 1
 fi
 
+# Find espflash — prefer PATH, fall back to ~/.cargo/bin
+if command -v espflash &>/dev/null; then
+    ESPFLASH="espflash"
+elif [[ -x "$HOME/.cargo/bin/espflash" ]]; then
+    ESPFLASH="$HOME/.cargo/bin/espflash"
+else
+    echo "ERROR: espflash not found. Install with: cargo +stable install espflash" >&2
+    exit 1
+fi
+
 # Find nvs_partition_gen.py in the ESP-IDF installation
 NVS_TOOL=""
 for candidate in \
@@ -72,7 +82,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 if $ERASE; then
     echo "Erasing WiFi credentials from NVS..."
-    espflash erase-parts --partitions nvs
+    "$ESPFLASH" erase-parts --no-stub --partitions nvs
     echo "Done. Device will boot into AP mode on next start."
     exit 0
 fi
@@ -103,7 +113,7 @@ echo "  SSID:        $SSID"
 echo "  Device name: $DEVICE_NAME"
 [[ -n "$RELAY_URL" ]] && echo "  Relay URL:   $RELAY_URL"
 
-espflash write-bin 0x9000 "$NVS_BIN"
+"$ESPFLASH" write-bin --no-stub 0x9000 "$NVS_BIN"
 echo ""
 echo "Done. Reset the device to apply changes."
 echo "If no firmware is flashed yet, run: scripts/flash.sh"
