@@ -36,6 +36,17 @@ The ESP32-S2 runs an HTTP server implementing the MCP protocol. It translates MC
 - Flipper Zero (any firmware version with CLI support)
 - WiFi Dev Board v1 (ESP32-S2-WROVER module)
 
+**Which device do I connect to?**
+
+| Stage | Connect to | Notes |
+|-------|-----------|-------|
+| Flashing firmware | **WiFi Dev Board** USB-C | Board has its own USB port, separate from Flipper |
+| Serial monitoring | **WiFi Dev Board** USB-C | Same USB connection as flashing |
+| SD card config files | **Flipper Zero** SD card | Insert SD into Flipper, or remove and mount on PC |
+| Server control commands | **Flipper Zero** SD card | Create `server.cmd` file in `apps_data/flipper_mcp/` |
+| UART communication | Automatic | WiFi Dev Board and Flipper connect via GPIO header |
+| MCP HTTP requests | **WiFi Dev Board** IP:8080 | Connect over your WiFi network |
+
 ## Prerequisites
 
 - **Rust** — install via [rustup](https://rustup.rs/):
@@ -90,7 +101,20 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 }
 ```
 
-### 5. (Optional) Remote access via relay
+### 5. (Optional) Control the HTTP server from the Flipper
+
+You can start, stop, or restart the MCP HTTP server by creating a command file on the Flipper's SD card:
+
+1. On the Flipper, navigate to: `SD Card → apps_data → flipper_mcp`
+2. Create a file named `server.cmd` containing one of: `stop`, `start`, or `restart`
+3. The ESP32 polls this file every 5 seconds, executes the command, and deletes the file
+
+You can also create the file from a PC by mounting the SD card:
+```bash
+echo "restart" > /path/to/sd/apps_data/flipper_mcp/server.cmd
+```
+
+### 6. (Optional) Remote access via relay
 ```bash
 ./scripts/build-relay.sh
 ./target/release/flipper-mcp-relay --listen 0.0.0.0:9090

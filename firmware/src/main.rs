@@ -1,5 +1,6 @@
 mod config;
 mod mcp;
+mod modules;
 mod uart;
 mod wifi;
 
@@ -12,10 +13,14 @@ use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use log::{error, info};
+use log::{error, info, warn};
 
 use config::NvsStorage;
+use mcp::transport::HttpServerManager;
 use uart::{CliProtocol, FlipperProtocol, UartTransport};
+
+const SERVER_CMD_PATH: &str = "/ext/apps_data/flipper_mcp/server.cmd";
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 fn main() -> Result<()> {
     // Step 1: ESP-IDF patches and logging
@@ -59,17 +64,67 @@ fn main() -> Result<()> {
     // Step 7: Smoke tests — verify UART communication with Flipper
     run_smoke_tests(&mut protocol);
 
-    // Step 8: Start MCP HTTP server
+    // Step 8: Create MCP server with module registry, start HTTP server
     let shared_protocol: Arc<Mutex<dyn FlipperProtocol>> = Arc::new(Mutex::new(protocol));
-    let mcp_server = Arc::new(mcp::McpServer::new(shared_protocol));
-    let _http = mcp::start_http_server(mcp_server)?;
+    let mcp_server = Arc::new(mcp::McpServer::new(shared_protocol.clone()));
 
-    // Step 9: Main loop — keep firmware alive (HTTP server runs in background threads)
+    let mut manager = HttpServerManager::new(mcp_server);
+    manager.start()?;
+
+    // Step 9: Main loop — poll Flipper SD card for server control commands
     info!("Firmware ready. MCP server listening on :8080");
     loop {
-        thread::sleep(Duration::from_secs(30));
-        info!("heartbeat — firmware alive");
+        thread::sleep(POLL_INTERVAL);
+
+        // Poll SD card for server control commands from the Flipper
+        let cmd = {
+            let mut proto = shared_protocol.lock().unwrap();
+            read_server_command(&mut *proto)
+        };
+
+        if let Some(cmd) = cmd {
+            info!("Server control command from Flipper: {}", cmd);
+            match cmd.as_str() {
+                "stop" => manager.stop(),
+                "start" => {
+                    if let Err(e) = manager.start() {
+                        error!("Failed to start HTTP server: {}", e);
+                    }
+                }
+                "restart" => {
+                    if let Err(e) = manager.restart() {
+                        error!("Failed to restart HTTP server: {}", e);
+                    }
+                }
+                _ => warn!("Unknown server command: {}", cmd),
+            }
+
+            // Remove the command file after processing
+            let mut proto = shared_protocol.lock().unwrap();
+            let _ = proto.execute_command(&format!("storage remove {}", SERVER_CMD_PATH));
+        }
     }
+}
+
+/// Read and validate a server control command from the Flipper's SD card.
+/// Returns None if no valid command file exists.
+fn read_server_command(protocol: &mut dyn FlipperProtocol) -> Option<String> {
+    let response = protocol
+        .execute_command(&format!("storage read {}", SERVER_CMD_PATH))
+        .ok()?;
+
+    let cmd = response.trim().to_string();
+
+    // Flipper CLI returns error messages for missing files
+    if cmd.is_empty()
+        || cmd.contains("Storage error")
+        || cmd.contains("Error")
+        || cmd.contains("File not found")
+    {
+        return None;
+    }
+
+    Some(cmd)
 }
 
 fn run_smoke_tests(protocol: &mut dyn FlipperProtocol) {
