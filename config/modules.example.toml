@@ -1,0 +1,83 @@
+# flipper-mcp custom modules config
+#
+# INSTALLATION:
+#   Copy this file to your Flipper Zero SD card at:
+#   /ext/apps_data/flipper_mcp/modules.toml
+#
+#   Then reload without reflashing:
+#   POST /mcp  {"jsonrpc":"2.0","id":1,"method":"modules/refresh","params":{}}
+#
+# SYNTAX:
+#   Each [[module]] block defines a group of related tools.
+#   Each [[module.tool]] block defines one MCP tool within that module.
+#   Each [[module.tool.params]] block defines one parameter for that tool.
+#
+#   In command_template, use {param_name} for parameter substitution.
+#   Parameters not listed in params are passed through as-is if present in args.
+
+# ─── Example 1: Custom frequency scanner ────────────────────────────────────
+
+[[module]]
+name = "custom_scanner"
+description = "Custom frequency scanner tools"
+
+  # Tool with no parameters (hardcoded frequency)
+  [[module.tool]]
+  name = "scan_433"
+  description = "Scan the 433.92 MHz band for Sub-GHz signals"
+  command_template = "subghz rx 433920000"
+
+  # Tool with a required parameter
+  [[module.tool]]
+  name = "scan_range"
+  description = "Scan a specified frequency for Sub-GHz signals"
+  command_template = "subghz rx {frequency}"
+
+    [[module.tool.params]]
+    name = "frequency"
+    type = "integer"
+    required = true
+    description = "Frequency in Hz (e.g. 433920000 for 433.92 MHz, 315000000 for 315 MHz)"
+
+# ─── Example 2: Saved signal replay ─────────────────────────────────────────
+
+[[module]]
+name = "saved_signals"
+description = "Replay saved Sub-GHz signal files from the SD card"
+
+  [[module.tool]]
+  name = "replay_gate"
+  description = "Replay the saved garage gate signal"
+  command_template = "subghz tx_from_file /ext/subghz/garage_gate.sub"
+
+  [[module.tool]]
+  name = "replay_file"
+  description = "Replay any .sub signal file from the SD card"
+  command_template = "subghz tx_from_file {path}"
+
+    [[module.tool.params]]
+    name = "path"
+    type = "string"
+    required = true
+    description = "Path to the .sub file (e.g. /ext/subghz/my_signal.sub)"
+
+# ─── Example 3: IR remote shortcuts ─────────────────────────────────────────
+
+[[module]]
+name = "tv_remote"
+description = "Common TV IR commands"
+
+  [[module.tool]]
+  name = "tv_power"
+  description = "Toggle TV power (Samsung NEC protocol)"
+  command_template = "ir tx NEC 0x07 0x02"
+
+  [[module.tool]]
+  name = "tv_volume_up"
+  description = "TV volume up"
+  command_template = "ir tx NEC 0x07 0x07"
+
+  [[module.tool]]
+  name = "tv_volume_down"
+  description = "TV volume down"
+  command_template = "ir tx NEC 0x07 0x0B"

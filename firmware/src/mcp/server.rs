@@ -56,6 +56,7 @@ impl McpServer {
             "tools/call" => self.handle_tools_call(id, params),
             "resources/list" => self.handle_resources_list(id),
             "resources/read" => error_response(id, jsonrpc::INTERNAL_ERROR, "Resource not found"),
+            "modules/refresh" => self.handle_modules_refresh(id),
             _ => {
                 warn!("Unknown method: {}", method);
                 error_response(id, METHOD_NOT_FOUND, format!("Method not found: {}", method))
@@ -109,5 +110,11 @@ impl McpServer {
 
     fn handle_resources_list(&self, id: Value) -> JsonRpcResponse {
         success_response(id, json!({ "resources": [] }))
+    }
+
+    fn handle_modules_refresh(&self, id: Value) -> JsonRpcResponse {
+        info!("Refreshing dynamic modules (FAP discovery + config reload)");
+        self.tools.refresh_dynamic();
+        success_response(id, json!({ "status": "refreshed" }))
     }
 }

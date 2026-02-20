@@ -25,4 +25,8 @@ impl ToolRegistry {
     pub fn call_tool(&self, name: &str, args: &Value) -> ToolResult {
         self.modules.call_tool(name, args)
     }
+
+    pub fn refresh_dynamic(&self) {
+        self.modules.refresh();
+    }
 }
