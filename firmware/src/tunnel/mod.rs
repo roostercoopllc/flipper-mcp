@@ -8,6 +8,7 @@ pub mod mdns;
 pub mod client;
 
 use std::any::Any;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use log::info;
@@ -40,18 +41,22 @@ pub fn start_mdns_if_available(hostname: &str) -> Option<Box<dyn Any + Send + 's
 ///
 /// To enable: add `espressif/esp_websocket_client: ">=1.1.0"` to `firmware/idf_component.yml`,
 /// then `cargo clean && cargo build`.
-pub fn start_tunnel_if_available(relay_url: &str, mcp_server: Arc<McpServer>) {
+pub fn start_tunnel_if_available(
+    relay_url: &str,
+    mcp_server: Arc<McpServer>,
+    relay_state: Arc<AtomicBool>,
+) {
     if relay_url.is_empty() {
         return;
     }
     #[cfg(esp_idf_comp_espressif__esp_websocket_client_enabled)]
     {
         info!("Starting tunnel to {}", relay_url);
-        client::start_tunnel(relay_url.to_string(), mcp_server);
+        client::start_tunnel(relay_url.to_string(), mcp_server, relay_state);
         return;
     }
-    // Suppress unused warning when cfg is false
-    let _ = mcp_server;
+    // Suppress unused warnings when cfg is false
+    let _ = (mcp_server, relay_state);
     info!(
         "Tunnel component not built — add espressif/esp_websocket_client to idf_component.yml \
          to enable remote access via relay ({})",

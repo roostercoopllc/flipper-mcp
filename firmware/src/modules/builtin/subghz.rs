@@ -127,7 +127,13 @@ impl FlipperModule for SubGhzModule {
             _ => return ToolResult::error(format!("Unknown subghz tool: {}", tool)),
         };
 
-        match protocol.execute_command(&command) {
+        // Receive/chat commands block the Flipper radio until a signal arrives —
+        // give them a generous timeout so the UART layer doesn't cut them short.
+        let timeout_ms: u32 = match tool {
+            "subghz_rx" | "subghz_rx_raw" | "subghz_chat" => 10_000,
+            _ => 3_000,
+        };
+        match protocol.execute_command_with_timeout(&command, timeout_ms) {
             Ok(output) => ToolResult::success(output),
             Err(e) => ToolResult::error(format!("{} failed: {}", tool, e)),
         }

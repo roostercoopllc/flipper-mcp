@@ -9,6 +9,8 @@ pub struct ParsedCTool {
     pub description: String,
     pub command_template: String,
     pub params: Vec<ParsedParam>,
+    /// Optional UART read timeout override in ms. Parse with `// timeout: 8000`.
+    pub timeout_ms: Option<u32>,
 }
 
 pub struct ParsedParam {
@@ -43,6 +45,7 @@ pub fn parse_c_tool(code: &str) -> Result<ParsedCTool, String> {
     let mut optional_params: Vec<String> = Vec::new();
     let mut func_name = String::new();
     let mut raw_params: Vec<(String, String)> = Vec::new(); // (type, name)
+    let mut timeout_ms: Option<u32> = None;
 
     for line in code.lines() {
         let trimmed = line.trim();
@@ -55,6 +58,10 @@ pub fn parse_c_tool(code: &str) -> Result<ParsedCTool, String> {
             }
         } else if let Some(rest) = trimmed.strip_prefix("// optional:") {
             optional_params.push(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("// timeout:") {
+            if let Ok(ms) = rest.trim().parse::<u32>() {
+                timeout_ms = Some(ms);
+            }
         } else if !trimmed.starts_with("//")
             && !trimmed.is_empty()
             && trimmed != "{"
@@ -89,7 +96,7 @@ pub fn parse_c_tool(code: &str) -> Result<ParsedCTool, String> {
         })
         .collect();
 
-    Ok(ParsedCTool { name: func_name, description, command_template: exec_template, params })
+    Ok(ParsedCTool { name: func_name, description, command_template: exec_template, params, timeout_ms })
 }
 
 /// Parse a C-style function signature line.
@@ -159,13 +166,19 @@ fn normalize_type(t: &str) -> String {
 
 /// Serialize a parsed tool to TOML text (compatible with the `config.rs` loader).
 pub fn to_module_toml(tool: &ParsedCTool) -> String {
+    let timeout_line = match tool.timeout_ms {
+        Some(ms) => format!("timeout_ms = {}\n", ms),
+        None => String::new(),
+    };
+
     let mut out = format!(
         "[[module]]\nname = \"custom_{name}\"\ndescription = \"Custom: {desc}\"\n\n\
          [[module.tool]]\nname = \"{name}\"\ndescription = \"{desc}\"\n\
-         command_template = \"{cmd}\"\n",
+         command_template = \"{cmd}\"\n{timeout}",
         name = tool.name,
         desc = escape_toml(&tool.description),
         cmd = escape_toml(&tool.command_template),
+        timeout = timeout_line,
     );
 
     for param in &tool.params {

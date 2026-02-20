@@ -14,6 +14,10 @@ pub(super) struct DynamicTool {
     /// For config tools it may contain substitutions (e.g., "subghz rx {frequency}").
     pub command_template: String,
     pub required_params: Vec<String>,
+    /// Optional UART read timeout override in milliseconds.
+    /// Useful for long-running commands (subghz rx, nfc detect, ir rx).
+    /// Falls back to the default 2 s when None.
+    pub timeout_ms: Option<u32>,
 }
 
 pub(super) struct DynamicModule {
@@ -48,10 +52,16 @@ impl FlipperModule for DynamicModule {
         };
 
         match substitute_params(&dt.command_template, args, &dt.required_params) {
-            Ok(cmd) => match protocol.execute_command(&cmd) {
-                Ok(output) => ToolResult::success(output),
-                Err(e) => ToolResult::error(format!("{} failed: {}", tool, e)),
-            },
+            Ok(cmd) => {
+                let result = match dt.timeout_ms {
+                    Some(t) => protocol.execute_command_with_timeout(&cmd, t),
+                    None => protocol.execute_command(&cmd),
+                };
+                match result {
+                    Ok(output) => ToolResult::success(output),
+                    Err(e) => ToolResult::error(format!("{} failed: {}", tool, e)),
+                }
+            }
             Err(msg) => ToolResult::error(msg),
         }
     }
@@ -147,6 +157,7 @@ fn make_fap_module(filename: &str) -> Option<DynamicModule> {
             },
             command_template: command,
             required_params: vec![],
+            timeout_ms: None,
         }],
     })
 }

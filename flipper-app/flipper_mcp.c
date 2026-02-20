@@ -4,15 +4,15 @@
  * Appears in Apps → Tools → Flipper MCP.
  *
  * Screens:
- *   Status         — reads status.txt; triggers on-demand refresh from ESP32.
- *   Start/Stop/Restart — writes server.cmd; ESP32 picks up within 5 s.
- *   Reboot Board   — writes "reboot" to server.cmd; ESP32 calls esp_restart().
- *   Configure WiFi — on-screen keyboard for SSID + password; writes config.txt.
- *                    This is the first-boot setup wizard — no PC/phone needed.
- *   View Logs      — scrollable log.txt written by ESP32 every 30 s.
- *   Tools List     — scrollable tools.txt listing all MCP tools on the ESP32.
- *   Refresh Modules — writes "refresh_modules" to server.cmd; ESP32 rescans
- *                     /ext/apps for FAP apps and reloads modules.toml.
+ *   Status         — reads status.txt on-demand; scrollable display of all ESP32 fields
+ *                    (ip, ssid, server, uart_ok, relay, heap_free, …).
+ *   Start/Stop/Restart — writes server.cmd; waits for server.ack confirmation (up to 6 s).
+ *   Reboot Board   — writes "reboot" to server.cmd; waits for ack before ESP32 restarts.
+ *   Configure WiFi — 3-step on-screen keyboard: SSID → Password → Relay URL (optional);
+ *                    writes config.txt. This is the first-boot setup wizard.
+ *   View Logs      — scrollable log.txt (last 20 lines, includes remote tool call audit).
+ *   Tools List     — scrollable tools.txt listing all registered MCP tools.
+ *   Refresh Modules — writes "refresh_modules"; waits for ack then shows result.
  *
  * Build:  cd flipper-app && ufbt
  * Deploy: ufbt launch   (USB) or copy dist/flipper_mcp.fap → SD:/apps/Tools/
@@ -38,24 +38,25 @@
 #define DATA_DIR    EXT_PATH("apps_data/flipper_mcp")
 #define STATUS_FILE EXT_PATH("apps_data/flipper_mcp/status.txt")
 #define CMD_FILE    EXT_PATH("apps_data/flipper_mcp/server.cmd")
+#define ACK_FILE    EXT_PATH("apps_data/flipper_mcp/server.ack")
 #define CONFIG_FILE EXT_PATH("apps_data/flipper_mcp/config.txt")
 #define LOG_FILE    EXT_PATH("apps_data/flipper_mcp/log.txt")
 #define TOOLS_FILE  EXT_PATH("apps_data/flipper_mcp/tools.txt")
 
-#define STATUS_BUF_LEN 512
-#define TEXT_BUF_LEN   1536  /* shared for log + tools display */
+#define TEXT_BUF_LEN   1536  /* shared for status / log / tools display */
 #define RESULT_BUF_LEN 128
 #define SSID_MAX_LEN   33    /* 32 chars + NUL */
 #define PASS_MAX_LEN   65    /* 64 chars + NUL */
+#define RELAY_MAX_LEN  129   /* 128 chars + NUL */
+#define ACK_BUF_LEN    64
 
 // ── View IDs ──────────────────────────────────────────────────────────────────
 
 typedef enum {
     ViewIdMenu = 0,
-    ViewIdStatus,
     ViewIdResult,
     ViewIdTextInput,
-    ViewIdScrollText,  /* reused for Logs and Tools List */
+    ViewIdScrollText,  /* reused for Status, Logs, and Tools List */
 } ViewId;
 
 // ── Menu item indices ─────────────────────────────────────────────────────────
@@ -76,6 +77,7 @@ typedef enum {
     ConfigStateNone,
     ConfigStateSsid,
     ConfigStatePass,
+    ConfigStateRelay,  /* optional relay URL — third step in the Configure flow */
 } ConfigState;
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -88,17 +90,16 @@ typedef struct {
 
     Submenu*   menu;
     TextInput* text_input;
-    View*      status_view;
     View*      result_view;
-    View*      scroll_view;  /* reused for logs and tools */
+    View*      scroll_view;  /* reused for status, logs, and tools */
 
-    char status[STATUS_BUF_LEN];
     char result[RESULT_BUF_LEN];
     char text_buf[TEXT_BUF_LEN];  /* current content for scroll_view */
     char scroll_title[32];         /* header shown on scroll_view */
 
     char ssid_buf[SSID_MAX_LEN];
     char pass_buf[PASS_MAX_LEN];
+    char relay_buf[RELAY_MAX_LEN];
     ConfigState config_state;
 
     uint8_t scroll_offset;   /* first visible line in scroll_view */
@@ -139,28 +140,104 @@ static bool write_file_str(FlipperMcpApp* app, const char* path, const char* con
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 
-/** Send "status" command so ESP32 writes a fresh status.txt, then read it. */
+/**
+ * Send "status" command, wait 2 s for ESP32 to write a fresh status.txt, then
+ * format each "key=value" line as "key: value" in text_buf for the scroll view.
+ * All fields (ip, ssid, server, uart_ok, relay, heap_free, …) are shown.
+ */
 static void action_request_and_read_status(FlipperMcpApp* app) {
     write_file_str(app, CMD_FILE, "status");
     furi_delay_ms(2000);
-    uint16_t n = read_file_to_buf(app, STATUS_FILE, app->status, STATUS_BUF_LEN);
+
+    char raw[512];
+    uint16_t n = read_file_to_buf(app, STATUS_FILE, raw, sizeof(raw));
+
+    strncpy(app->scroll_title, "Status", sizeof(app->scroll_title) - 1);
+    app->scroll_offset = 0;
+
     if(n == 0) {
         strncpy(
-            app->status,
-            "No status file found.\nIs the ESP32 powered\nand running firmware?",
-            STATUS_BUF_LEN - 1);
+            app->text_buf,
+            "No status file.\nIs ESP32 powered\nand running firmware?",
+            TEXT_BUF_LEN - 1);
+        return;
     }
+
+    /* Format "key=value\n" lines as "key: value\n" */
+    app->text_buf[0] = '\0';
+    char* p = raw;
+    size_t out_pos = 0;
+    while(*p && out_pos + 32 < TEXT_BUF_LEN) {
+        char* nl = strchr(p, '\n');
+        if(nl) *nl = '\0';
+        char* eq = strchr(p, '=');
+        if(eq) {
+            *eq = '\0';
+            int written = snprintf(
+                app->text_buf + out_pos,
+                TEXT_BUF_LEN - out_pos - 1,
+                "%.20s: %.90s\n",
+                p, eq + 1);
+            if(written > 0) out_pos += (size_t)written;
+        }
+        if(!nl) break;
+        p = nl + 1;
+    }
+    if(out_pos == 0)
+        strncpy(app->text_buf, "(empty status file)", TEXT_BUF_LEN - 1);
 }
 
-/** Write a command to server.cmd; returns true on success. */
-static bool action_write_cmd(FlipperMcpApp* app, const char* cmd) {
-    bool ok = write_file_str(app, CMD_FILE, cmd);
-    if(ok) {
-        notification_message(app->notifications, &sequence_success);
-    } else {
+/**
+ * Write cmd to server.cmd, then poll server.ack for up to 6 s (12 × 500 ms).
+ * Fills app->result with a human-readable confirmation or timeout message.
+ */
+static void action_write_cmd_and_wait_ack(FlipperMcpApp* app, const char* cmd) {
+    /* Remove stale ack from a previous command so we don't read a false positive */
+    storage_simply_remove(app->storage, ACK_FILE);
+
+    if(!write_file_str(app, CMD_FILE, cmd)) {
+        strncpy(app->result, "Write failed.\nIs SD card\ninserted?", RESULT_BUF_LEN - 1);
         notification_message(app->notifications, &sequence_error);
+        return;
     }
-    return ok;
+    notification_message(app->notifications, &sequence_success);
+
+    /* Poll every 500 ms, up to 12 attempts = 6 s max */
+    char ack_buf[ACK_BUF_LEN];
+    bool got_ack = false;
+    for(int i = 0; i < 12; i++) {
+        furi_delay_ms(500);
+        uint16_t n = read_file_to_buf(app, ACK_FILE, ack_buf, ACK_BUF_LEN);
+        if(n > 0) {
+            got_ack = true;
+            break;
+        }
+    }
+
+    if(got_ack) {
+        char* result_line = strstr(ack_buf, "result=");
+        if(result_line) {
+            result_line += 7; /* skip "result=" */
+            char* nl = strchr(result_line, '\n');
+            if(nl) *nl = '\0';
+            if(strncmp(result_line, "ok", 2) == 0) {
+                snprintf(
+                    app->result, RESULT_BUF_LEN,
+                    "%.12s: OK\nConfirmed by ESP32.", cmd);
+            } else {
+                snprintf(
+                    app->result, RESULT_BUF_LEN,
+                    "%.12s: Error\n%.90s", cmd, result_line);
+                notification_message(app->notifications, &sequence_error);
+            }
+        } else {
+            snprintf(app->result, RESULT_BUF_LEN, "%.12s sent.\nACK received.", cmd);
+        }
+    } else {
+        snprintf(
+            app->result, RESULT_BUF_LEN,
+            "%.12s sent.\nNo ACK in 6s.\nCheck Status screen.", cmd);
+    }
 }
 
 /** Load the log file into text_buf for the scroll view. */
@@ -183,38 +260,47 @@ static void action_load_tools(FlipperMcpApp* app) {
     app->scroll_offset = 0;
 }
 
-/** Pre-fill SSID from existing config.txt (best-effort). */
-static void action_prefill_ssid(FlipperMcpApp* app) {
-    char existing[STATUS_BUF_LEN];
-    read_file_to_buf(app, CONFIG_FILE, existing, STATUS_BUF_LEN);
-    app->ssid_buf[0] = '\0';
+/**
+ * Pre-fill SSID and relay URL from existing config.txt (best-effort).
+ * Password is intentionally left blank for security.
+ */
+static void action_prefill_config(FlipperMcpApp* app) {
+    char existing[512];
+    read_file_to_buf(app, CONFIG_FILE, existing, sizeof(existing));
+    app->ssid_buf[0]  = '\0';
+    app->relay_buf[0] = '\0';
     char* p = existing;
     while(*p) {
         char* nl = strchr(p, '\n');
         if(nl) *nl = '\0';
         if(strncmp(p, "wifi_ssid=", 10) == 0) {
             strncpy(app->ssid_buf, p + 10, SSID_MAX_LEN - 1);
-            break;
+        } else if(strncmp(p, "relay_url=", 10) == 0) {
+            strncpy(app->relay_buf, p + 10, RELAY_MAX_LEN - 1);
         }
         if(!nl) break;
         p = nl + 1;
     }
 }
 
-/** Write config.txt with SSID + password. */
+/**
+ * Write config.txt with SSID, password, and relay URL.
+ * relay_url may be empty — the ESP32 treats an empty value as "relay disabled".
+ */
 static void action_save_config(FlipperMcpApp* app) {
-    char content[192];
+    char content[300];
     snprintf(
         content,
         sizeof(content),
-        "wifi_ssid=%s\nwifi_password=%s\n",
+        "wifi_ssid=%s\nwifi_password=%s\nrelay_url=%s\n",
         app->ssid_buf,
-        app->pass_buf);
+        app->pass_buf,
+        app->relay_buf);
     bool ok = write_file_str(app, CONFIG_FILE, content);
     if(ok) {
         strncpy(
             app->result,
-            "WiFi config saved!\nSelect Reboot Board\nto apply.",
+            "Config saved!\nSelect Reboot Board\nto apply.",
             RESULT_BUF_LEN - 1);
         notification_message(app->notifications, &sequence_success);
     } else {
@@ -227,46 +313,6 @@ static void action_save_config(FlipperMcpApp* app) {
 }
 
 // ── Draw callbacks ────────────────────────────────────────────────────────────
-
-static void draw_status(Canvas* canvas, void* model) {
-    FlipperMcpApp* app = *(FlipperMcpApp**)model;
-    canvas_clear(canvas);
-    canvas_set_color(canvas, ColorBlack);
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 10, "Status");
-    canvas_draw_line(canvas, 0, 13, 128, 13);
-    canvas_set_font(canvas, FontSecondary);
-
-    char buf[STATUS_BUF_LEN];
-    strncpy(buf, app->status, STATUS_BUF_LEN - 1);
-    buf[STATUS_BUF_LEN - 1] = '\0';
-
-    uint8_t y = 25;
-    char* line = buf;
-    char* nl;
-    while((nl = strchr(line, '\n')) != NULL && y <= 56) {
-        *nl = '\0';
-        char* eq = strchr(line, '=');
-        if(eq) {
-            *eq = '\0';
-            char pretty[128];
-            snprintf(pretty, sizeof(pretty), "%.24s: %.96s", line, eq + 1);
-            canvas_draw_str(canvas, 2, y, pretty);
-            y += 10;
-        }
-        line = nl + 1;
-    }
-    if(y == 25) {
-        elements_multiline_text_aligned(
-            canvas, 64, 38, AlignCenter, AlignCenter, "No status yet.\nWait 30s or retry.");
-    }
-    canvas_draw_str(canvas, 2, 63, "[Back] Menu");
-}
-
-static bool input_status(InputEvent* event, void* context) {
-    UNUSED(context);
-    return event->key != InputKeyBack; /* let Back propagate to navigation callback */
-}
 
 static void draw_result(Canvas* canvas, void* model) {
     FlipperMcpApp* app = *(FlipperMcpApp**)model;
@@ -281,10 +327,10 @@ static void draw_result(Canvas* canvas, void* model) {
 
 static bool input_result(InputEvent* event, void* context) {
     UNUSED(context);
-    return event->key != InputKeyBack;
+    return event->key != InputKeyBack; /* let Back propagate to navigation callback */
 }
 
-/** Shared draw callback for logs and tools — scrollable line list. */
+/** Shared draw callback for status, logs, and tools — scrollable line list. */
 static void draw_scroll(Canvas* canvas, void* model) {
     FlipperMcpApp* app = *(FlipperMcpApp**)model;
     canvas_clear(canvas);
@@ -311,8 +357,7 @@ static void draw_scroll(Canvas* canvas, void* model) {
     }
 
     if(lc == 0) {
-        elements_multiline_text_aligned(
-            canvas, 64, 38, AlignCenter, AlignCenter, "(empty)");
+        elements_multiline_text_aligned(canvas, 64, 38, AlignCenter, AlignCenter, "(empty)");
     } else {
         uint8_t y = 24;
         for(uint8_t i = app->scroll_offset; i < lc && y <= 56; i++, y += 10) {
@@ -356,7 +401,15 @@ static void text_input_done_cb(void* context) {
             app->text_input, text_input_done_cb, app, app->pass_buf, PASS_MAX_LEN, false);
         /* Stay on ViewIdTextInput — it redraws itself */
     } else if(app->config_state == ConfigStatePass) {
-        /* Password accepted — save and show result */
+        /* Password accepted — move to relay URL (optional, step 3) */
+        app->config_state = ConfigStateRelay;
+        text_input_reset(app->text_input);
+        text_input_set_header_text(app->text_input, "Relay URL (opt.)");
+        text_input_set_result_callback(
+            app->text_input, text_input_done_cb, app, app->relay_buf, RELAY_MAX_LEN, true);
+        /* Stay on ViewIdTextInput */
+    } else if(app->config_state == ConfigStateRelay) {
+        /* Relay URL accepted (may be empty) — save everything and show result */
         app->config_state = ConfigStateNone;
         action_save_config(app);
         app->current_view = ViewIdResult;
@@ -373,52 +426,36 @@ static void menu_cb(void* context, uint32_t index) {
 
     case MenuStatus:
         action_request_and_read_status(app);
-        app->current_view = ViewIdStatus;
-        view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdStatus);
+        app->current_view = ViewIdScrollText;
+        view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdScrollText);
         break;
 
     case MenuStart:
-        strncpy(
-            app->result,
-            action_write_cmd(app, "start") ? "Start sent.\nESP32 picks up\nin ~5 seconds."
-                                           : "Write failed.\nIs SD card inserted?",
-            RESULT_BUF_LEN - 1);
+        action_write_cmd_and_wait_ack(app, "start");
         app->current_view = ViewIdResult;
         view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
         break;
 
     case MenuStop:
-        strncpy(
-            app->result,
-            action_write_cmd(app, "stop") ? "Stop sent.\nESP32 picks up\nin ~5 seconds."
-                                          : "Write failed.\nIs SD card inserted?",
-            RESULT_BUF_LEN - 1);
+        action_write_cmd_and_wait_ack(app, "stop");
         app->current_view = ViewIdResult;
         view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
         break;
 
     case MenuRestart:
-        strncpy(
-            app->result,
-            action_write_cmd(app, "restart") ? "Restart sent.\nESP32 picks up\nin ~5 seconds."
-                                             : "Write failed.\nIs SD card inserted?",
-            RESULT_BUF_LEN - 1);
+        action_write_cmd_and_wait_ack(app, "restart");
         app->current_view = ViewIdResult;
         view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
         break;
 
     case MenuReboot:
-        strncpy(
-            app->result,
-            action_write_cmd(app, "reboot") ? "Reboot sent.\nESP32 will\nrestart shortly."
-                                            : "Write failed.\nIs SD card inserted?",
-            RESULT_BUF_LEN - 1);
+        action_write_cmd_and_wait_ack(app, "reboot");
         app->current_view = ViewIdResult;
         view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
         break;
 
     case MenuConfigure:
-        action_prefill_ssid(app);
+        action_prefill_config(app);
         app->pass_buf[0] = '\0';
         app->config_state = ConfigStateSsid;
         text_input_reset(app->text_input);
@@ -442,12 +479,7 @@ static void menu_cb(void* context, uint32_t index) {
         break;
 
     case MenuRefresh:
-        strncpy(
-            app->result,
-            action_write_cmd(app, "refresh_modules")
-                ? "Refresh sent.\nESP32 rescans apps\n& reloads modules."
-                : "Write failed.\nIs SD card inserted?",
-            RESULT_BUF_LEN - 1);
+        action_write_cmd_and_wait_ack(app, "refresh_modules");
         app->current_view = ViewIdResult;
         view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
         break;
@@ -522,15 +554,12 @@ int32_t flipper_mcp_app(void* p) {
     view_dispatcher_add_view(
         app->view_dispatcher, ViewIdMenu, submenu_get_view(app->menu));
 
-    /* Text input (shared for SSID and password entry) */
+    /* Text input (shared for SSID, password, and relay URL entry) */
     app->text_input = text_input_alloc();
     view_dispatcher_add_view(
         app->view_dispatcher, ViewIdTextInput, text_input_get_view(app->text_input));
 
     /* Custom views */
-    app->status_view = alloc_custom_view(app, draw_status, input_status);
-    view_dispatcher_add_view(app->view_dispatcher, ViewIdStatus, app->status_view);
-
     app->result_view = alloc_custom_view(app, draw_result, input_result);
     view_dispatcher_add_view(app->view_dispatcher, ViewIdResult, app->result_view);
 
@@ -543,13 +572,11 @@ int32_t flipper_mcp_app(void* p) {
     /* Cleanup */
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdMenu);
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdTextInput);
-    view_dispatcher_remove_view(app->view_dispatcher, ViewIdStatus);
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdResult);
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdScrollText);
 
     submenu_free(app->menu);
     text_input_free(app->text_input);
-    view_free(app->status_view);
     view_free(app->result_view);
     view_free(app->scroll_view);
     view_dispatcher_free(app->view_dispatcher);

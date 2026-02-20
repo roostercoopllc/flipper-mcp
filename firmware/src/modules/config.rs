@@ -34,6 +34,8 @@ struct ToolDef {
     command_template: String,
     #[serde(default)]
     params: Vec<ParamDef>,
+    /// Optional UART timeout in ms for long-running commands (e.g. subghz rx, nfc detect).
+    timeout_ms: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +181,7 @@ fn build_dynamic_module(def: ModuleDef) -> DynamicModule {
                 },
                 command_template: t.command_template,
                 required_params,
+                timeout_ms: t.timeout_ms,
             }
         })
         .collect();

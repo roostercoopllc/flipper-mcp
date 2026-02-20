@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use log::{info, warn};
 use serde_json::{json, Value};
 
+use crate::log_buffer::LogBuffer;
 use crate::uart::FlipperProtocol;
 
 use super::jsonrpc::{
@@ -13,12 +14,16 @@ use super::tools::ToolRegistry;
 
 pub struct McpServer {
     tools: ToolRegistry,
+    /// Shared log buffer — tool call results are pushed here so the
+    /// Flipper FAP "View Logs" screen can show remote tool activity.
+    log_buffer: Arc<LogBuffer>,
 }
 
 impl McpServer {
-    pub fn new(protocol: Arc<Mutex<dyn FlipperProtocol>>) -> Self {
+    pub fn new(protocol: Arc<Mutex<dyn FlipperProtocol>>, log_buffer: Arc<LogBuffer>) -> Self {
         Self {
             tools: ToolRegistry::new(protocol),
+            log_buffer,
         }
     }
 
@@ -101,6 +106,13 @@ impl McpServer {
 
         info!("Calling tool: {}", tool_name);
         let result = self.tools.call_tool(tool_name, &arguments);
+
+        // Push to log buffer so FAP "View Logs" shows remote tool activity
+        self.log_buffer.push(&format!(
+            "[tool] {} {}",
+            tool_name,
+            if result.is_error { "ERR" } else { "OK" }
+        ));
 
         match serde_json::to_value(&result) {
             Ok(val) => success_response(id, val),

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -19,21 +20,26 @@ const TUNNEL_STACK_SIZE: usize = 10240;
 /// MCP requests arriving over the tunnel are dispatched to `mcp_server` and responses
 /// are sent back over the same WebSocket connection.
 ///
+/// `relay_state` is set to `true` when the WebSocket is connected and `false` on
+/// disconnect or error — allowing `main.rs` to surface this in `status.txt`.
+///
 /// The thread handles reconnection automatically with exponential backoff (5s → 60s max).
-pub fn start_tunnel(relay_url: String, mcp_server: Arc<McpServer>) {
+pub fn start_tunnel(relay_url: String, mcp_server: Arc<McpServer>, relay_state: Arc<AtomicBool>) {
     thread::Builder::new()
         .stack_size(TUNNEL_STACK_SIZE)
         .spawn(move || {
             let mut backoff_secs = 5u64;
             loop {
                 info!("Tunnel: connecting to {}", relay_url);
-                match run_session(&relay_url, &mcp_server) {
+                match run_session(&relay_url, &mcp_server, &relay_state) {
                     Ok(()) => {
                         info!("Tunnel: disconnected cleanly, reconnecting...");
+                        relay_state.store(false, Ordering::Relaxed);
                         backoff_secs = 5;
                     }
                     Err(e) => {
                         warn!("Tunnel: session error ({}). Retrying in {}s", e, backoff_secs);
+                        relay_state.store(false, Ordering::Relaxed);
                         thread::sleep(Duration::from_secs(backoff_secs));
                         backoff_secs = (backoff_secs * 2).min(60);
                     }
@@ -44,7 +50,11 @@ pub fn start_tunnel(relay_url: String, mcp_server: Arc<McpServer>) {
 }
 
 /// Run one WebSocket session. Returns Ok(()) on clean disconnect, Err on failures.
-fn run_session(relay_url: &str, mcp_server: &Arc<McpServer>) -> Result<()> {
+fn run_session(
+    relay_url: &str,
+    mcp_server: &Arc<McpServer>,
+    relay_state: &Arc<AtomicBool>,
+) -> Result<()> {
     // Channel: WS event callback → processing loop
     let (tx, rx) = mpsc::sync_channel::<SessionEvent>(16);
 
@@ -57,6 +67,8 @@ fn run_session(relay_url: &str, mcp_server: &Arc<McpServer>) -> Result<()> {
         ..Default::default()
     };
 
+    let relay_state_cb = relay_state.clone();
+
     let mut client = EspWebSocketClient::new(
         relay_url,
         &cfg,
@@ -64,6 +76,7 @@ fn run_session(relay_url: &str, mcp_server: &Arc<McpServer>) -> Result<()> {
         move |event: Result<WebSocketEvent<'_>, esp_idf_svc::sys::EspError>| match event {
             Ok(evt) => match &evt.event_type {
                 WebSocketEventType::Connected => {
+                    relay_state_cb.store(true, Ordering::Relaxed);
                     info!("Tunnel: WebSocket connected");
                 }
                 WebSocketEventType::Text(data) => {
@@ -76,12 +89,14 @@ fn run_session(relay_url: &str, mcp_server: &Arc<McpServer>) -> Result<()> {
                     }
                 }
                 WebSocketEventType::Disconnected | WebSocketEventType::Closed => {
+                    relay_state_cb.store(false, Ordering::Relaxed);
                     info!("Tunnel: WebSocket disconnected");
                     let _ = tx_disc.try_send(SessionEvent::Disconnected);
                 }
                 _ => {}
             },
             Err(e) => {
+                relay_state_cb.store(false, Ordering::Relaxed);
                 error!("Tunnel: WS event error: {}", e);
                 let _ = tx_disc.try_send(SessionEvent::Disconnected);
             }
