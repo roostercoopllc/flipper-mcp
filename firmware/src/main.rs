@@ -12,7 +12,7 @@ use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use log::{error, info};
 
-use config::{NvsStorage, Settings};
+use config::NvsStorage;
 use uart::{CliProtocol, FlipperProtocol, UartTransport};
 
 fn main() -> Result<()> {

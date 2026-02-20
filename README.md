@@ -36,19 +36,38 @@ The ESP32-S2 runs an HTTP server implementing the MCP protocol. It translates MC
 - Flipper Zero (any firmware version with CLI support)
 - WiFi Dev Board v1 (ESP32-S2-WROVER module)
 
+## Prerequisites
+
+- **Rust** — install via [rustup](https://rustup.rs/):
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+- **Xtensa toolchain** — ESP32-S2 requires a custom Rust toolchain:
+  ```bash
+  cargo install espup
+  espup install
+  source ~/export-esp.sh  # Run this in every new terminal
+  ```
+- **Flash tool & linker proxy**:
+  ```bash
+  cargo install espflash
+  cargo install ldproxy
+  ```
+- **System packages** (Debian/Ubuntu/Kali):
+  ```bash
+  sudo apt install -y git curl gcc build-essential pkg-config libudev-dev libssl-dev python3 python3-venv cmake ninja-build
+  ```
+
 ## Quick Start
 
 > Full setup instructions in [docs/SETUP.md](docs/SETUP.md)
 
-### 1. Install toolchain
+### 1. Build & flash firmware
 ```bash
-./scripts/setup-toolchain.sh
-```
-
-### 2. Build & flash firmware
-```bash
-./scripts/build.sh
-./scripts/flash.sh
+source ~/export-esp.sh
+cd firmware
+cargo build --release --target xtensa-esp32s2-espidf
+espflash flash --monitor target/xtensa-esp32s2-espidf/release/flipper-mcp
 ```
 
 ### 3. Configure WiFi

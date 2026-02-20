@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
@@ -17,6 +17,9 @@ pub fn connect_wifi(
         bail!("WiFi SSID is empty — configure via NVS or wifi-config.sh");
     }
 
+    ensure!(settings.wifi_ssid.len() <= 32, "SSID too long (max 32 bytes)");
+    ensure!(settings.wifi_password.len() <= 64, "Password too long (max 64 bytes)");
+
     info!("Connecting to WiFi SSID: {:?}", settings.wifi_ssid);
 
     let mut wifi = BlockingWifi::wrap(
@@ -24,17 +27,10 @@ pub fn connect_wifi(
         sys_loop,
     )?;
 
+    // unwrap is safe: we validated lengths above
     let config = Configuration::Client(ClientConfiguration {
-        ssid: settings
-            .wifi_ssid
-            .as_str()
-            .try_into()
-            .context("SSID too long (max 32 bytes)")?,
-        password: settings
-            .wifi_password
-            .as_str()
-            .try_into()
-            .context("Password too long (max 64 bytes)")?,
+        ssid: settings.wifi_ssid.as_str().try_into().unwrap(),
+        password: settings.wifi_password.as_str().try_into().unwrap(),
         ..Default::default()
     });
 

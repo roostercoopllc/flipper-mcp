@@ -12,3 +12,4 @@ build-std = ["std", "panic_abort"]
 [env]
 MCU = "esp32s2"
 ESP_IDF_VERSION = "v5.2.5"
+ESP_ROM_ELF_DIR = "/dev/null"

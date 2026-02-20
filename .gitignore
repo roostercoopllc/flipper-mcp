@@ -3,6 +3,7 @@ target/
 **/*.rs.bk
 
 # ESP-IDF build artifacts
+.embuild/
 build/
 managed_components/
 dependencies.lock
