@@ -340,20 +340,26 @@ static void draw_scroll(Canvas* canvas, void* model) {
     canvas_draw_line(canvas, 0, 13, 128, 13);
     canvas_set_font(canvas, FontSecondary);
 
-    char buf[TEXT_BUF_LEN];
-    strncpy(buf, app->text_buf, TEXT_BUF_LEN - 1);
-    buf[TEXT_BUF_LEN - 1] = '\0';
-
-    /* Collect pointers to each line */
-    const char* lines[64];
-    uint8_t lc = 0;
-    char* p = buf;
-    while(*p && lc < 64) {
-        lines[lc++] = p;
-        char* nl = strchr(p, '\n');
-        if(!nl) break;
-        *nl = '\0';
-        p = nl + 1;
+    /* Build line index by scanning text_buf in-place — no stack copy of the
+     * 1536-byte buffer, which would overflow the draw callback's stack. */
+    const char* line_start[48];
+    uint8_t     line_len[48];
+    uint8_t     lc = 0;
+    const char* p = app->text_buf;
+    while(*p && lc < 48) {
+        const char* nl = strchr(p, '\n');
+        line_start[lc] = p;
+        if(nl) {
+            size_t span = (size_t)(nl - p);
+            line_len[lc] = (uint8_t)(span < 255 ? span : 255);
+            lc++;
+            p = nl + 1;
+        } else {
+            size_t span = strlen(p);
+            line_len[lc] = (uint8_t)(span < 255 ? span : 255);
+            lc++;
+            break;
+        }
     }
 
     if(lc == 0) {
@@ -362,8 +368,9 @@ static void draw_scroll(Canvas* canvas, void* model) {
         uint8_t y = 24;
         for(uint8_t i = app->scroll_offset; i < lc && y <= 56; i++, y += 10) {
             char trimmed[28];
-            strncpy(trimmed, lines[i], sizeof(trimmed) - 1);
-            trimmed[sizeof(trimmed) - 1] = '\0';
+            uint8_t len = line_len[i] < 27 ? line_len[i] : 27;
+            memcpy(trimmed, line_start[i], len);
+            trimmed[len] = '\0';
             canvas_draw_str(canvas, 2, y, trimmed);
         }
         if(app->scroll_offset > 0) canvas_draw_str(canvas, 119, 22, "^");
@@ -396,7 +403,7 @@ static void text_input_done_cb(void* context) {
         app->config_state = ConfigStatePass;
         app->pass_buf[0] = '\0';
         text_input_reset(app->text_input);
-        text_input_set_header_text(app->text_input, "WiFi Password");
+        text_input_set_header_text(app->text_input, "Password (^key=caps)");
         text_input_set_result_callback(
             app->text_input, text_input_done_cb, app, app->pass_buf, PASS_MAX_LEN, false);
         /* Stay on ViewIdTextInput — it redraws itself */
