@@ -3,9 +3,9 @@ App(
     name="Flipper MCP",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="flipper_mcp_app",
-    requires=["gui", "storage", "notification"],
+    requires=["gui", "storage", "notification", "expansion"],
     sources=["flipper_mcp.c"],
     fap_category="Tools",
-    fap_version=(1, 0),
-    fap_description="Manage the Flipper MCP WiFi board — view status, start/stop the MCP HTTP server.",
+    fap_version=(2, 0),
+    fap_description="Manage the Flipper MCP WiFi board — direct UART communication with ESP32.",
 )

@@ -84,4 +84,39 @@ impl UartTransport {
         self.driver.clear_rx().context("Failed to clear UART RX buffer")?;
         Ok(())
     }
+
+    /// Read a single `\n`-terminated line from UART.
+    /// Returns `None` if nothing received within `timeout_ms`.
+    /// Strips `\r` and limits line length to 1024 bytes.
+    pub fn read_line(&self, timeout_ms: u32) -> Option<String> {
+        let mut line = Vec::with_capacity(256);
+        let mut buf = [0u8; 1];
+
+        loop {
+            match self.driver.read(&mut buf, timeout_ms) {
+                Ok(1) => match buf[0] {
+                    b'\n' => break,
+                    b'\r' => continue,
+                    b => {
+                        line.push(b);
+                        if line.len() >= 1024 {
+                            break;
+                        }
+                    }
+                },
+                _ => {
+                    if line.is_empty() {
+                        return None;
+                    }
+                    break;
+                }
+            }
+        }
+
+        if line.is_empty() {
+            return None;
+        }
+
+        Some(String::from_utf8_lossy(&line).to_string())
+    }
 }

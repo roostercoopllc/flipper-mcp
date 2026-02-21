@@ -41,6 +41,11 @@ impl LogBuffer {
         buf.push(line);
     }
 
+    /// Return a snapshot of all buffered lines (does not clear).
+    pub fn snapshot(&self) -> Vec<String> {
+        self.lines.lock().unwrap().clone()
+    }
+
     /// Write the buffer contents to log.txt on the Flipper SD card.
     pub fn flush_to_sd(&self, protocol: &mut dyn crate::uart::FlipperProtocol) {
         let content = {
