@@ -78,5 +78,8 @@ This firmware targets the **v1 board** (ESP32-S2). The v2 board uses ESP32-S3 an
 1. Power off the Flipper Zero
 2. Seat the WiFi Dev Board onto the expansion header (top of Flipper)
 3. Power on the Flipper — the ESP32-S2 boots automatically
-4. Connect the WiFi Dev Board USB-C to your computer for flashing
-5. After flashing, USB is optional — the board runs on Flipper power
+4. **Disable Expansion Modules:** Go to **Settings → System → Expansion Modules → None**.
+   Without this, the Flipper's expansion protocol handler intercepts UART data
+   and the ESP32 cannot communicate with the CLI. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#no-status-file-despite-esp32-running--expansion-modules-setting) for details.
+5. Connect the WiFi Dev Board USB-C to your computer for flashing
+6. After flashing, USB is optional — the board runs on Flipper power

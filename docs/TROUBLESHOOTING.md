@@ -109,17 +109,11 @@ target/xtensa-esp32s2-espidf/release/flipper-mcp
 
 ## WiFi Issues
 
-### Device creates FlipperMCP-XXXX hotspot instead of connecting
-No WiFi credentials are stored. Use the captive portal:
-1. Connect to `FlipperMCP-XXXX` (open network)
-2. Open `http://192.168.4.1`
-3. Enter your WiFi SSID and password
-4. Click Save & Connect
-
-Or pre-configure via script:
-```bash
-./scripts/wifi-config.sh --ssid YourSSID --password YourPassword
-```
+### ESP32 stuck in "needs_config" loop
+No WiFi credentials found. Create `config.txt` on the Flipper's SD card:
+1. Use the FAP: **Apps → Tools → Flipper MCP → Configure WiFi**
+2. Or manually create `/ext/apps_data/flipper_mcp/config.txt` with `wifi_ssid=...` and `wifi_password=...`
+3. Reboot the ESP32 after saving
 
 ### Device connected to WiFi but can't be reached
 ```bash
@@ -151,17 +145,32 @@ Then: `cd firmware && cargo clean && cargo build --release --target xtensa-esp32
 
 ## UART / Flipper Communication Issues
 
+### "No status file" despite ESP32 running — Expansion Modules setting
+
+**This is the #1 gotcha.** Flipper firmware 0.97.0+ has an Expansion Modules
+feature that listens on the UART expansion port for the expansion protocol
+handshake. When enabled, it intercepts **all** UART data before the CLI shell
+sees it, so the ESP32's commands are silently dropped.
+
+**Fix:** On the Flipper, go to **Settings → System → Expansion Modules** and
+set it to **None**.
+
+Options you may see (varies by firmware version):
+| Setting | Effect |
+|---------|--------|
+| **None** | UART passed straight to CLI — **use this** |
+| Listen UART USART | Expansion protocol intercepts UART — breaks this project |
+| LPUART | Expansion protocol on low-power UART — also breaks this project |
+
+After changing the setting, reboot the ESP32 (or use the FAP's Reboot Board
+option). The status file should appear within a few seconds.
+
 ### `UART smoke tests failed` or tools returning empty output
 Check the physical connection between the WiFi Dev Board and Flipper Zero:
 - The GPIO header must be fully seated
 - Flipper must be powered on
 - Flipper CLI must be accessible (not in a full-screen app)
-
-Test manually with `espflash monitor`:
-```
-storage list /ext
-```
-Should return a directory listing. If it returns empty or errors, the UART connection has an issue.
+- **Expansion Modules must be set to None** (see above)
 
 ### Commands timeout (`execute_command: timeout`)
 - Default timeout is 500ms — some commands (like `subghz rx`) take longer
@@ -169,7 +178,40 @@ Should return a directory listing. If it returns empty or errors, the UART conne
 - Try restarting the Flipper
 
 ### `Storage error: File not found` for SD card config
-The SD card isn't inserted, or the path doesn't exist. This is non-fatal — the firmware continues with NVS/default settings.
+The SD card isn't inserted, or the path doesn't exist. The firmware enters the
+"waiting for config" loop until `config.txt` is created.
+
+---
+
+## Serial Monitor Issues (Linux)
+
+### `screen` or `espflash monitor` immediately terminates on `/dev/ttyACM0`
+
+**ModemManager** (installed by default on many Linux distros) probes new USB CDC
+devices by sending AT commands. This confuses the ESP32 and can kill the
+connection.
+
+**Fix:**
+```bash
+sudo systemctl stop ModemManager
+# To prevent it from starting on reboot:
+sudo systemctl disable ModemManager
+```
+
+Then unplug and re-plug the USB cable (or reset the board) and try again.
+
+### `espflash monitor` shows `Protocol error` after RESET
+
+`espflash monitor` expects the ESP-IDF boot stub protocol. On the ESP32-S2 with
+USB CDC, the running firmware doesn't speak this protocol. Use a plain serial
+terminal instead:
+```bash
+screen /dev/ttyACM0 115200
+# Press Ctrl+A then K to exit screen
+```
+
+Note: USB CDC console output requires `CONFIG_ESP_CONSOLE_USB_CDC=y` in
+`sdkconfig.defaults` and a clean rebuild (`cargo clean`).
 
 ---
 

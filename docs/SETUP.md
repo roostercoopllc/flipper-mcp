@@ -80,44 +80,52 @@ cargo run --release --target xtensa-esp32s2-espidf
 
 ---
 
+## Flipper Settings (Important!)
+
+Before using the WiFi Dev Board with this firmware, you **must** disable the
+Flipper's expansion module protocol handler. If left enabled, it intercepts all
+UART data and the ESP32 cannot communicate with the Flipper CLI.
+
+**On the Flipper Zero:**
+1. Go to **Settings → System → Expansion Modules**
+2. Set to **None**
+
+> **Symptom if skipped:** The firmware flashes and boots fine, but the FAP
+> shows "No status file — is ESP32 powered and running firmware?" because
+> the ESP32's UART commands are silently swallowed by the expansion protocol
+> handler instead of reaching the CLI shell.
+
+---
+
 ## WiFi Configuration
-
-### Option A: Captive portal (easiest, no tools needed)
-
-1. Flash the firmware (no WiFi credentials needed yet)
-2. On first boot, the device creates a `FlipperMCP-XXXX` open WiFi hotspot
-3. Connect any device to that hotspot
-4. Open `http://192.168.4.1` in a browser
-5. Enter your WiFi SSID and password, click **Save & Connect**
-6. The device reboots and connects to your WiFi as a client
-
-### Option B: NVS script (before first boot, requires python3)
-
-```bash
-./scripts/wifi-config.sh --ssid YourSSID --password YourPassword
-```
-
-Options:
-```
---ssid       WiFi network name (required)
---password   WiFi password
---name       Device hostname (default: flipper-mcp)
---relay      Relay URL for remote access (e.g. ws://relay.example.com:9090/tunnel)
---erase      Erase stored credentials (returns device to AP mode)
-```
-
-### Option C: SD card config file
 
 Create `/ext/apps_data/flipper_mcp/config.txt` on the Flipper's SD card:
 ```
-# Flipper MCP Configuration
 wifi_ssid=YourNetwork
 wifi_password=YourPassword
 device_name=flipper-mcp
-relay_url=ws://relay.example.com:9090/tunnel
+relay_url=wss://relay.example.com/tunnel
 ```
 
-The firmware reads this file on every boot, overriding NVS values.
+You can create this file in two ways:
+
+### Option A: Flipper FAP Configure WiFi screen (easiest)
+
+1. Open the Flipper MCP app: **Apps → Tools → Flipper MCP**
+2. Select **Configure WiFi**
+3. Enter your SSID (use the **^** key on the on-screen keyboard for uppercase)
+4. Enter your password
+5. Select **Reboot Board** to apply
+
+### Option B: Edit the SD card directly
+
+Mount the Flipper's SD card on your PC (or use the Flipper's USB mass storage
+mode) and create/edit the file at `apps_data/flipper_mcp/config.txt`.
+
+If `config.txt` is missing or `wifi_ssid` is empty on boot, the ESP32 enters a
+**waiting-for-config** loop — it blinks the LED and writes `status=needs_config`
+to `status.txt`. Use the FAP's Configure WiFi screen to set credentials, then
+reboot the board.
 
 ---
 
