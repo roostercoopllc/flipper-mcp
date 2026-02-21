@@ -8,15 +8,22 @@ use crate::config::Settings;
 
 use super::station;
 
-/// Connect to an existing WiFi network in STA mode.
-/// Returns the live wifi handle (must be kept alive to maintain the connection).
-/// If `wifi_ssid` is empty in `settings`, returns an error — callers should
-/// wait for the user to create config.txt via the Flipper FAP before calling this.
-pub fn connect_wifi(
+/// Create the WiFi driver without connecting. See `start_and_connect`.
+pub fn create_wifi(
     modem: Modem,
     sys_loop: EspSystemEventLoop,
     nvs_partition: EspDefaultNvsPartition,
     settings: &Settings,
 ) -> Result<BlockingWifi<EspWifi<'static>>> {
-    station::connect_wifi(modem, sys_loop, nvs_partition, settings)
+    station::create_wifi(modem, sys_loop, nvs_partition, settings)
+}
+
+/// Start the radio and connect. Can be retried on failure.
+pub fn start_and_connect(wifi: &mut BlockingWifi<EspWifi<'static>>) -> Result<()> {
+    station::start_and_connect(wifi)
+}
+
+/// Re-apply credentials after config change. Call before retrying `start_and_connect`.
+pub fn reconfigure(wifi: &mut BlockingWifi<EspWifi<'static>>, settings: &Settings) -> Result<()> {
+    station::reconfigure(wifi, settings)
 }

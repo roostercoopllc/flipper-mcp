@@ -56,7 +56,12 @@ fn main() -> Result<()> {
     )?;
     let mut protocol = CliProtocol::new(transport);
 
-    // Step 4: Load config from Flipper SD card (sole persistent config store).
+    // Step 4a: Write an early "booting" status so the FAP can confirm UART is alive.
+    // Without this, a WiFi failure would leave zero files written — indistinguishable
+    // from "UART not working" on the Flipper side.
+    write_boot_status(&mut protocol, "booting");
+
+    // Step 4b: Load config from Flipper SD card (sole persistent config store).
     // If config.txt is missing or has no SSID, wait in a patience loop until the
     // user creates it via the Flipper FAP "Configure WiFi" screen.
     if let Err(e) = settings.load_from_sd(&mut protocol) {
@@ -72,8 +77,27 @@ fn main() -> Result<()> {
         }
     }
 
-    // Step 5: Connect WiFi — STA mode only
-    let wifi = wifi::connect_wifi(peripherals.modem, sys_loop, nvs_partition, &settings)?;
+    // Step 5: Connect WiFi — STA mode only, with retry loop.
+    // Create the driver first (consumes modem), then retry connect() on failure
+    // so the user gets diagnostic feedback on the Flipper FAP.
+    write_boot_status(&mut protocol, "connecting_wifi");
+    let mut wifi = wifi::create_wifi(peripherals.modem, sys_loop, nvs_partition, &settings)?;
+    loop {
+        match wifi::start_and_connect(&mut wifi) {
+            Ok(()) => break,
+            Err(e) => {
+                error!("WiFi connect failed: {}. Retrying in 10s.", e);
+                write_wifi_error_status(&mut protocol, &settings, &e.to_string());
+                thread::sleep(Duration::from_secs(10));
+                // Re-read config in case user changed credentials via FAP
+                if let Err(e2) = settings.load_from_sd(&mut protocol) {
+                    info!("Config re-read: {}", e2);
+                }
+                // Re-apply config if SSID changed
+                wifi::reconfigure(&mut wifi, &settings)?;
+            }
+        }
+    }
 
     // Step 6: Capture IP address for status reporting
     let device_ip = wifi
@@ -309,6 +333,40 @@ fn write_needs_config_status(protocol: &mut dyn FlipperProtocol, settings: &conf
     );
     if let Err(e) = protocol.write_file(STATUS_FILE_PATH, &content) {
         warn!("needs_config status write failed (non-fatal): {}", e);
+    }
+}
+
+/// Write a minimal status file during early boot (before WiFi).
+/// Confirms UART communication is working and tells the user what phase we're in.
+fn write_boot_status(protocol: &mut dyn FlipperProtocol, phase: &str) {
+    let content = format!(
+        "status={}\nver={}\n",
+        phase,
+        env!("CARGO_PKG_VERSION"),
+    );
+    if let Err(e) = protocol.write_file(STATUS_FILE_PATH, &content) {
+        warn!("Boot status write failed (non-fatal): {}", e);
+    }
+}
+
+/// Write a status file indicating WiFi connection failed, with the error message.
+/// The user sees this on the Flipper FAP Status screen and can fix credentials.
+fn write_wifi_error_status(
+    protocol: &mut dyn FlipperProtocol,
+    settings: &config::Settings,
+    error: &str,
+) {
+    // Truncate error to fit in a reasonable status line
+    let short_err = if error.len() > 80 { &error[..80] } else { error };
+    let content = format!(
+        "status=wifi_error\nssid={}\nerror={}\ndevice={}\nver={}\n",
+        settings.wifi_ssid,
+        short_err,
+        settings.device_name,
+        env!("CARGO_PKG_VERSION"),
+    );
+    if let Err(e) = protocol.write_file(STATUS_FILE_PATH, &content) {
+        warn!("WiFi error status write failed (non-fatal): {}", e);
     }
 }
 
