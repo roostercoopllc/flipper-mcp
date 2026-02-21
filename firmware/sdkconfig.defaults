@@ -23,4 +23,5 @@ CONFIG_ESP_WEBSOCKET_CLIENT=y
 # Route ESP-IDF logs to USB CDC so /dev/ttyACM0 stays alive after boot.
 # Without this, logs go to UART0 (GPIO43/44) and the USB port disappears
 # once the application starts — making it impossible to see firmware output.
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
 CONFIG_ESP_CONSOLE_USB_CDC=y
