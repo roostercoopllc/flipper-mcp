@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
-use log::{info, warn};
+use log::info;
 
 use super::Settings;
 

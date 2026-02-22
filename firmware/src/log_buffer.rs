@@ -1,17 +1,12 @@
 /// Circular in-memory log buffer.
 ///
 /// Accumulates up to `MAX_LINES` recent log lines (trimmed to `MAX_LINE_LEN` chars).
-/// Flushed to `/ext/apps_data/flipper_mcp/log.txt` on the Flipper SD card by the
-/// main loop so the Flipper FAP "View Logs" screen can display diagnostics without
-/// requiring a USB serial connection.
+/// Pushed to the Flipper FAP over UART so the "View Logs" screen can display
+/// diagnostics without requiring a USB serial connection.
 use std::sync::Mutex;
-
-use log::warn;
 
 const MAX_LINES: usize = 20;
 const MAX_LINE_LEN: usize = 80;
-
-pub const LOG_FILE_PATH: &str = "/ext/apps_data/flipper_mcp/log.txt";
 
 pub struct LogBuffer {
     lines: Mutex<Vec<String>>,
@@ -44,16 +39,5 @@ impl LogBuffer {
     /// Return a snapshot of all buffered lines (does not clear).
     pub fn snapshot(&self) -> Vec<String> {
         self.lines.lock().unwrap().clone()
-    }
-
-    /// Write the buffer contents to log.txt on the Flipper SD card.
-    pub fn flush_to_sd(&self, protocol: &mut dyn crate::uart::FlipperProtocol) {
-        let content = {
-            let buf = self.lines.lock().unwrap();
-            buf.join("\n") + "\n"
-        };
-        if let Err(e) = protocol.write_file(LOG_FILE_PATH, &content) {
-            warn!("Log flush failed (non-fatal): {}", e);
-        }
     }
 }

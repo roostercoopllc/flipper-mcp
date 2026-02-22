@@ -36,10 +36,6 @@ impl FlipperProtocol for StubProtocol {
         anyhow::bail!("Flipper CLI not available — FAP bridge mode (Phase 2)")
     }
 
-    fn get_device_info(&mut self) -> Result<String> {
-        anyhow::bail!("Flipper CLI not available — FAP bridge mode (Phase 2)")
-    }
-
     fn write_file(&mut self, _path: &str, _content: &str) -> Result<()> {
         anyhow::bail!("Flipper CLI not available — FAP bridge mode (Phase 2)")
     }

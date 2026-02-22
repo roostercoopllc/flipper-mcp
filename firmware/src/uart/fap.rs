@@ -120,10 +120,6 @@ impl FlipperProtocol for FapProtocol {
         self.execute_command(command)
     }
 
-    fn get_device_info(&mut self) -> Result<String> {
-        self.execute_command("device_info")
-    }
-
     fn write_file(&mut self, _path: &str, _content: &str) -> Result<()> {
         warn!("write_file unavailable (FAP protocol, no CLI relay)");
         anyhow::bail!("File write not available — FAP bridge mode (Phase 2)")

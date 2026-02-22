@@ -3,10 +3,6 @@ use esp_idf_svc::hal::gpio;
 use esp_idf_svc::hal::peripheral::Peripheral;
 use esp_idf_svc::hal::uart::{self, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
-use log::debug;
-
-const RX_BUF_SIZE: usize = 1024;
-const PROMPT: &[u8] = b">: ";
 
 pub struct UartTransport {
     driver: UartDriver<'static>,
@@ -34,54 +30,12 @@ impl UartTransport {
         Ok(Self { driver })
     }
 
-    pub fn send(&self, command: &str) -> Result<()> {
-        debug!("UART TX: {}", command);
-
-        let data = format!("{}\r\n", command);
-        self.driver
-            .write(data.as_bytes())
-            .context("UART write failed")?;
+    /// Send raw bytes — used for all protocol messages.
+    pub fn write_raw(&self, data: &[u8]) -> Result<()> {
+        self.driver.write(data).context("UART raw write failed")?;
         self.driver
             .wait_tx_done(100)
             .context("UART TX flush timeout")?;
-
-        Ok(())
-    }
-
-    pub fn read_response(&self, timeout_ms: u32) -> Result<String> {
-        let mut response = Vec::with_capacity(RX_BUF_SIZE);
-        let mut buf = [0u8; 256];
-
-        loop {
-            match self.driver.read(&mut buf, timeout_ms) {
-                Ok(0) => break,
-                Ok(n) => {
-                    response.extend_from_slice(&buf[..n]);
-                    if response.len() >= PROMPT.len()
-                        && response[response.len() - PROMPT.len()..] == *PROMPT
-                    {
-                        response.truncate(response.len() - PROMPT.len());
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-
-        let text = String::from_utf8_lossy(&response).to_string();
-        debug!("UART RX ({} bytes): {}", response.len(), text);
-        Ok(text)
-    }
-
-    /// Send raw bytes without appending \r\n — used for binary payloads (e.g. write_chunk data).
-    pub fn write_raw(&self, data: &[u8]) -> Result<()> {
-        self.driver.write(data).context("UART raw write failed")?;
-        self.driver.wait_tx_done(100).context("UART TX flush timeout")?;
-        Ok(())
-    }
-
-    pub fn clear_rx(&self) -> Result<()> {
-        self.driver.clear_rx().context("Failed to clear UART RX buffer")?;
         Ok(())
     }
 
