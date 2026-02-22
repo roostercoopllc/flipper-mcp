@@ -439,7 +439,7 @@ static void action_prefill_config(FlipperMcpApp* app) {
  */
 static void action_save_config(FlipperMcpApp* app) {
     /* Send CONFIG over UART -- ESP32 saves to NVS */
-    char config_line[256];
+    char config_line[320];
     snprintf(
         config_line, sizeof(config_line),
         "CONFIG|ssid=%s|password=%s|relay=%s",
@@ -449,7 +449,7 @@ static void action_save_config(FlipperMcpApp* app) {
     uart_send(app, config_line);
 
     /* Also write config.txt to SD as a human-readable backup */
-    char file_content[256];
+    char file_content[320];
     snprintf(
         file_content, sizeof(file_content),
         "wifi_ssid=%s\nwifi_password=%s\nrelay_url=%s\n",
