@@ -126,6 +126,8 @@ typedef struct {
     char  tools_buf[TEXT_BUF_LEN];    /* latest TOOLS list */
     char  ack_buf[ACK_BUF_LEN];      /* latest ACK */
     volatile bool ack_received;
+    volatile uint32_t rx_bytes;       /* debug: total bytes received from UART */
+    volatile uint32_t rx_lines;       /* debug: total lines parsed */
     FuriMutex* data_mutex;            /* protects status/log/tools/ack buffers */
 } FlipperMcpApp;
 
@@ -250,12 +252,14 @@ static int32_t uart_worker_thread(void* context) {
         uint8_t byte;
         size_t received = furi_stream_buffer_receive(app->rx_stream, &byte, 1, 100);
         if(received == 0) continue;
+        app->rx_bytes++;
 
         if(byte == '\n') {
             if(line_pos > 0) {
                 /* Strip trailing \r if present */
                 if(line_pos > 0 && line_buf[line_pos - 1] == '\r') line_pos--;
                 line_buf[line_pos] = '\0';
+                app->rx_lines++;
                 uart_parse_line(app, line_buf);
                 line_pos = 0;
             }
@@ -316,12 +320,21 @@ static void action_show_status(FlipperMcpApp* app) {
 
     furi_mutex_acquire(app->data_mutex, FuriWaitForever);
     if(app->status_buf[0] != '\0') {
-        strncpy(app->text_buf, app->status_buf, TEXT_BUF_LEN - 1);
+        /* Copy status then append debug counters */
+        strncpy(app->text_buf, app->status_buf, TEXT_BUF_LEN / 2);
+        app->text_buf[TEXT_BUF_LEN / 2] = '\0';
+        size_t pos = strlen(app->text_buf);
+        snprintf(
+            app->text_buf + pos, TEXT_BUF_LEN - pos - 1,
+            "\n-- debug --\nrx_bytes: %lu\nrx_lines: %lu",
+            (unsigned long)app->rx_bytes,
+            (unsigned long)app->rx_lines);
     } else {
-        strncpy(
-            app->text_buf,
-            "No status yet.\nWaiting for ESP32...\n\nIs the board powered?",
-            TEXT_BUF_LEN - 1);
+        snprintf(
+            app->text_buf, TEXT_BUF_LEN - 1,
+            "No status yet.\nWaiting for ESP32...\n\nrx_bytes: %lu\nrx_lines: %lu\n\nIs the board powered?",
+            (unsigned long)app->rx_bytes,
+            (unsigned long)app->rx_lines);
     }
     furi_mutex_release(app->data_mutex);
 }
