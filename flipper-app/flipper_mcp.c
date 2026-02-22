@@ -713,7 +713,7 @@ static void uart_init(FlipperMcpApp* app) {
     /* Start worker thread */
     app->worker_running = true;
     app->data_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
-    app->uart_worker = furi_thread_alloc_ex("McpUartWorker", 1024, uart_worker_thread, app);
+    app->uart_worker = furi_thread_alloc_ex("McpUartWorker", 2048, uart_worker_thread, app);
     furi_thread_start(app->uart_worker);
 
     FURI_LOG_I(TAG, "UART initialized at %d baud", UART_BAUD_RATE);
