@@ -94,6 +94,11 @@ fn main() -> Result<()> {
                     fap.push_status("status=needs_config");
                 }
                 FapMessage::Cmd(cmd) => {
+                    if cmd == "reboot" {
+                        fap.push_ack("reboot", "ok");
+                        thread::sleep(Duration::from_millis(100));
+                        unsafe { esp_idf_svc::sys::esp_restart() }
+                    }
                     fap.push_ack(&cmd, "err:no_wifi");
                 }
             }
@@ -120,17 +125,38 @@ fn main() -> Result<()> {
                 };
                 fap.push_status(&format!("status=wifi_error|error={}", err_short));
 
-                // Poll for CONFIG updates while waiting to retry
+                // Poll for FAP messages while waiting to retry
                 for _ in 0..10 {
                     thread::sleep(Duration::from_secs(1));
                     for msg in fap.poll_messages() {
-                        if let FapMessage::Config(payload) = msg {
-                            settings.merge_from_pipe_pairs(&payload);
-                            if let Err(e2) = nvs_config.save_settings(&settings) {
-                                warn!("NVS save: {}", e2);
+                        match msg {
+                            FapMessage::Config(payload) => {
+                                settings.merge_from_pipe_pairs(&payload);
+                                if let Err(e2) = nvs_config.save_settings(&settings) {
+                                    warn!("NVS save: {}", e2);
+                                }
+                                wifi::reconfigure(&mut wifi, &settings)?;
+                                fap.push_ack("config", "ok");
                             }
-                            wifi::reconfigure(&mut wifi, &settings)?;
-                            fap.push_ack("config", "ok");
+                            FapMessage::Cmd(cmd) => {
+                                info!("FAP command during WiFi retry: {}", cmd);
+                                if cmd == "reboot" {
+                                    fap.push_ack("reboot", "ok");
+                                    thread::sleep(Duration::from_millis(100));
+                                    unsafe { esp_idf_svc::sys::esp_restart() }
+                                } else if cmd == "status" {
+                                    fap.push_status(&format!(
+                                        "status=wifi_error|error={}",
+                                        err_short
+                                    ));
+                                    fap.push_ack("status", "ok");
+                                } else {
+                                    fap.push_ack(&cmd, "err:wifi_not_connected");
+                                }
+                            }
+                            FapMessage::Ping => {
+                                fap.push_pong();
+                            }
                         }
                     }
                 }
@@ -202,7 +228,10 @@ fn main() -> Result<()> {
                         handle_command(cmd, &mut manager, &mcp_server, &log_buf, &fap);
 
                     if cmd == "reboot" {
-                        // handle_command already sent ACK and flushed logs
+                        // handle_command already sent ACK and flushed logs;
+                        // small delay ensures UART TX buffer is fully transmitted
+                        // before the chip resets.
+                        thread::sleep(Duration::from_millis(100));
                         unsafe { esp_idf_svc::sys::esp_restart() }
                     }
 

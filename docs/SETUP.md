@@ -47,7 +47,7 @@ cd firmware
 cargo build --release --target xtensa-esp32s2-espidf
 ```
 
-The binary is at `firmware/target/xtensa-esp32s2-espidf/release/flipper-mcp`.
+The binary is at `target/xtensa-esp32s2-espidf/release/flipper-mcp` (under the **workspace root**, not `firmware/target/`).
 
 Or use the helper script:
 ```bash
@@ -58,25 +58,76 @@ Or use the helper script:
 
 ## Flashing
 
-**Connect the WiFi Dev Board's USB-C port** (not the Flipper's USB-C).
+The ESP32-S2 on the WiFi Dev Board v1 uses **native USB** (USB-OTG), not a
+USB-to-UART bridge. This means flashing requires manually entering the ROM
+bootloader — the chip cannot be auto-reset into download mode via serial
+DTR/RTS lines like ESP32 boards with a CP2102/CH340 bridge.
 
+### Step 1: Enter bootloader mode
+
+**Remove the WiFi Dev Board from the Flipper** before flashing. The Flipper's
+GPIO header can hold pins in states that interfere with the bootloader.
+
+Then put the board into download mode:
+
+1. **Unplug** the USB cable from the WiFi Dev Board
+2. **Hold the BOOT button** (small tactile button on the board PCB)
+3. **While holding BOOT**, plug the USB-C cable into the board
+4. **Release BOOT** after ~1 second
+
+Verify the board is in bootloader mode:
+```bash
+dmesg | tail -5
+# Should show: "Product: USB JTAG/serial debug unit" or similar
+# (NOT "Product: ESP32-S2" — that means the firmware booted instead)
+ls /dev/ttyACM0   # Should exist
+```
+
+> **Tip:** If you see `Product: ESP32-S2` in dmesg, the firmware booted
+> instead of the bootloader. Try again — hold BOOT *before* plugging in,
+> and don't release it until the USB cable is firmly connected.
+
+If the board has both BOOT and RESET buttons: hold BOOT, tap RESET briefly,
+then release BOOT.
+
+### Step 2: Flash
+
+Flash **immediately** after entering bootloader mode (the bootloader can
+time out):
+
+```bash
+espflash flash target/xtensa-esp32s2-espidf/release/flipper-mcp
+```
+
+> **Note:** The build places the binary under the **workspace root** `target/`
+> directory, not `firmware/target/`. If running from the workspace root, use
+> `target/xtensa-esp32s2-espidf/release/flipper-mcp`. See
+> [TROUBLESHOOTING.md](TROUBLESHOOTING.md#no-such-file-or-directory-when-specifying-the-binary-path)
+> if you get path errors.
+
+Or use the helper script (handles the path automatically):
 ```bash
 ./scripts/flash.sh
-# Opens the serial monitor automatically after flashing.
-# Press Ctrl+C to exit.
 ```
 
-Or manually:
-```bash
-source ~/export-esp.sh
-cd firmware
-cargo run --release --target xtensa-esp32s2-espidf
-```
+### Step 3: Reset and re-attach
 
-### Troubleshooting flash failures
-- Try adding `ESPFLASH_PORT=/dev/ttyUSB0` (or `ttyACM0`) to the environment
-- On Kali/Debian: `sudo usermod -a -G dialout $USER` then log out and back in
-- Hold the BOOT button on the WiFi Dev Board while plugging in to enter download mode manually
+After flashing:
+1. Unplug USB from the WiFi Dev Board
+2. Seat the board back onto the Flipper's expansion header
+3. Power on the Flipper — the ESP32 boots automatically
+
+### Common flash errors
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Communication error while flashing device` | Flash stub incompatibility | Add `--no-stub` flag |
+| `Error while connecting to device` | Board not in bootloader mode | Redo BOOT + plug sequence |
+| `No serial ports found` | USB not detected | Check cable, try different port |
+| `No such file or directory` | Wrong binary path | Use workspace root `target/` path |
+| `Permission denied` on `/dev/ttyACM0` | Not in dialout group | `sudo usermod -a -G dialout $USER` then re-login |
+
+For detailed troubleshooting, see [TROUBLESHOOTING.md — Flash Issues](TROUBLESHOOTING.md#flash-issues).
 
 ---
 

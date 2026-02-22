@@ -35,51 +35,134 @@ Use `ensure!()` + `unwrap()` instead of `.context("…")?`.
 
 ## Flash Issues
 
-### Device not detected / `No serial ports found`
-The WiFi Module v1 (ESP32-S2) uses **native USB CDC** and only enumerates when in bootloader
-mode. The running firmware uses UART (not USB), so the board won't appear as a serial port
-during normal operation.
+### Understanding ESP32-S2 USB flashing
 
-**Step 1 — Enter bootloader mode:**
-1. Connect the WiFi Module's USB-C to your PC (not the Flipper's port)
-2. Hold the **BOOT** button on the module
-3. Briefly tap **RESET**, then release **BOOT**
-4. The board should now appear as `/dev/ttyACM0`
+The WiFi Dev Board v1 uses an **ESP32-S2 with native USB-OTG** — there is no
+USB-to-UART bridge chip (like CP2102 or CH340). This has two important
+consequences:
 
-Verify:
+1. **The running firmware creates `/dev/ttyACM0`** via USB CDC
+   (`CONFIG_ESP_CONSOLE_USB_CDC=y`). This looks like a serial port but it's
+   the firmware's console — **not** the bootloader. You cannot flash through
+   this interface.
+
+2. **You must physically enter the ROM bootloader** by holding GPIO0 (BOOT
+   button) during reset. Unlike ESP32 boards with a UART bridge, `espflash`
+   cannot auto-reset the S2 into download mode via DTR/RTS.
+
+When you see `dmesg` output like:
+```
+Product: ESP32-S2
+Manufacturer: Espressif
+cdc_acm ... ttyACM0: USB ACM device
+```
+That's the **firmware running**, not the bootloader. The bootloader shows
+different USB descriptors (e.g., `USB JTAG/serial debug unit`).
+
+### Entering bootloader mode (required for every flash)
+
+**Important:** Remove the WiFi Dev Board from the Flipper's GPIO header
+before flashing. The Flipper can hold GPIO pins in states that prevent
+bootloader entry.
+
+**Method A — BOOT + USB plug (most reliable):**
+1. Unplug the USB cable from the WiFi Dev Board
+2. Locate the **BOOT** button on the board PCB (small tactile switch)
+3. **Hold BOOT**, then plug the USB-C cable in
+4. Wait 1 second, then release BOOT
+5. Check `dmesg | tail -5` — you should NOT see `Product: ESP32-S2`
+
+**Method B — BOOT + RESET (if board has both buttons):**
+1. With USB already connected, hold **BOOT**
+2. Tap **RESET** briefly
+3. Release **BOOT**
+
+**Method C — Software reboot to bootloader** (no physical buttons needed):
+
+If the firmware is running and accessible via USB serial, you can trigger a
+reboot into download mode. Install `esptool`:
 ```bash
-lsusb | grep -i espressif   # Should show: 303a:0002 Espressif
-ls /dev/ttyACM*             # Should show: /dev/ttyACM0
+pip install esptool  # or: pip install --break-system-packages esptool
+```
+Then:
+```bash
+esptool.py --chip esp32s2 --port /dev/ttyACM0 run
+# This sometimes resets the chip; immediately re-run espflash
 ```
 
-**Step 2 — Flash immediately** (the bootloader has a short idle timeout):
+### Flashing the firmware
+
+After entering bootloader mode, flash **immediately** (the bootloader can
+time out):
+
 ```bash
-~/.cargo/bin/espflash flash --no-stub --port /dev/ttyACM0 \
-  /home/atilla/Code/flipper-mcp/target/xtensa-esp32s2-espidf/release/flipper-mcp
+espflash flash target/xtensa-esp32s2-espidf/release/flipper-mcp
 ```
 
-If you need to add yourself to the `dialout` group (required on some distros):
+If `espflash` detects the port automatically, it should flash without
+specifying `--port`. If it picks the wrong port:
 ```bash
-sudo usermod -a -G dialout $USER
-# Log out and back in for group to take effect
+espflash flash --port /dev/ttyACM0 \
+  target/xtensa-esp32s2-espidf/release/flipper-mcp
 ```
 
-### `Communication error while flashing device` (flash stub failure)
-The default flash stub is sometimes incompatible. Use `--no-stub` to bypass it:
+### `Communication error while flashing device`
+
+This means `espflash` connected to the bootloader and uploaded the flash stub,
+but communication broke during the actual data transfer. Common causes:
+
+- **USB cable issue:** Use a short, high-quality data cable (not charge-only)
+- **USB hub instability:** Connect directly to the computer, not through a hub
+- **Flash stub incompatibility:** Bypass the stub with `--no-stub`:
+  ```bash
+  espflash flash --no-stub target/xtensa-esp32s2-espidf/release/flipper-mcp
+  ```
+- **Corrupted flash state:** Erase first, then flash:
+  ```bash
+  espflash erase-flash
+  # Re-enter bootloader mode, then:
+  espflash flash target/xtensa-esp32s2-espidf/release/flipper-mcp
+  ```
+
+### `Error while connecting to device`
+
+The board is not in bootloader mode. The `/dev/ttyACM0` device you see is
+from the running firmware's USB CDC console, not the ROM bootloader.
+
+**Fix:** Follow the bootloader entry steps above. Verify with:
 ```bash
-~/.cargo/bin/espflash flash --no-stub --port /dev/ttyACM0 \
-  /home/atilla/Code/flipper-mcp/target/xtensa-esp32s2-espidf/release/flipper-mcp
+dmesg | tail -5
+# Firmware running (WRONG for flashing): "Product: ESP32-S2"
+# Bootloader mode (CORRECT): different descriptor or no "Product: ESP32-S2"
 ```
-If that still fails, try erasing flash first:
+
+### `espflash` retries with `UsbJtagSerial reset strategy` and fails
+
+```
+Using UsbJtagSerial reset strategy
+Failed to reset, error Connection(Error { kind: Unknown, description: "Protocol error" })
+```
+
+This happens when `espflash` misidentifies the ESP32-S2 as an ESP32-S3/C3
+(which have USB-JTAG-Serial, a different USB peripheral). The S2 has USB-OTG
+instead. Workaround:
 ```bash
-~/.cargo/bin/espflash erase-flash --no-stub --port /dev/ttyACM0
-# then flash again
+espflash flash --before default-reset \
+  target/xtensa-esp32s2-espidf/release/flipper-mcp
+```
+Or enter bootloader mode manually and use `--before no-reset`:
+```bash
+# After entering bootloader with BOOT button:
+espflash flash --before no-reset \
+  target/xtensa-esp32s2-espidf/release/flipper-mcp
 ```
 
 ### Interactive prompts cause bootloader to time out
-`espflash` asks "Use serial port?" and "Remember?" on the first run. By the time you answer,
-the bootloader has timed out. Do BOOT+RESET again immediately before running the flash command.
-Subsequent runs skip the prompts (port is remembered), so only the first flash is affected.
+
+`espflash` asks "Use serial port?" and "Remember?" on the first run. By the
+time you answer, the bootloader has timed out. Enter bootloader mode again
+immediately before running the flash command. Subsequent runs skip the prompts
+(port is remembered).
 
 ### `espflash: command not found`
 ```bash
@@ -96,14 +179,58 @@ source ~/.zshrc
 ```
 
 ### `No such file or directory` when specifying the binary path
-The workspace puts build artifacts under the **workspace root** `target/`, not `firmware/target/`.
-Always use the full path:
+
+The workspace puts build artifacts under the **workspace root** `target/`, not
+`firmware/target/`. Always use:
 ```bash
-/home/atilla/Code/flipper-mcp/target/xtensa-esp32s2-espidf/release/flipper-mcp
-# or from the workspace root:
+# From workspace root:
 target/xtensa-esp32s2-espidf/release/flipper-mcp
+
+# Or the absolute path:
+/home/you/Code/flipper-mcp/target/xtensa-esp32s2-espidf/release/flipper-mcp
 ```
-`cargo run --release` (from `firmware/`) handles this automatically via the `.cargo/config.toml` runner.
+`cargo run --release` (from `firmware/`) handles this automatically via the
+`.cargo/config.toml` runner.
+
+### `Permission denied` on `/dev/ttyACM0`
+```bash
+sudo usermod -a -G dialout $USER
+# Log out and back in for group change to take effect
+```
+
+### ModemManager interference
+
+On many Linux distros, **ModemManager** probes new USB CDC devices by sending
+AT commands. This confuses the ESP32 and can cause flash failures or serial
+monitor disconnections.
+
+```bash
+sudo systemctl stop ModemManager
+sudo systemctl disable ModemManager  # prevent it from starting on reboot
+```
+Then unplug and re-plug the USB cable.
+
+### Quick reference: flash cheat sheet
+
+```bash
+# 1. Remove board from Flipper
+# 2. Hold BOOT, plug USB, release BOOT
+# 3. Flash:
+espflash flash target/xtensa-esp32s2-espidf/release/flipper-mcp
+
+# If "Communication error":
+espflash flash --no-stub target/xtensa-esp32s2-espidf/release/flipper-mcp
+
+# If "Error while connecting":
+#   → Board is NOT in bootloader mode. Redo step 2.
+
+# If "UsbJtagSerial" errors:
+espflash flash --before no-reset target/xtensa-esp32s2-espidf/release/flipper-mcp
+
+# Nuclear option — erase everything and start fresh:
+espflash erase-flash
+# Re-enter bootloader, then flash. WiFi config in NVS will be lost.
+```
 
 ---
 
@@ -145,41 +272,94 @@ Then: `cd firmware && cargo clean && cargo build --release --target xtensa-esp32
 
 ## UART / Flipper Communication Issues
 
-### "No status file" despite ESP32 running — Expansion Modules setting
+### FAP Status shows "No status yet" with rx_bytes: 0
 
-**This is the #1 gotcha.** Flipper firmware 0.97.0+ has an Expansion Modules
-feature that listens on the UART expansion port for the expansion protocol
-handshake. When enabled, it intercepts **all** UART data before the CLI shell
-sees it, so the ESP32's commands are silently dropped.
+No bytes are being received from the ESP32 over UART. Check in order:
 
-**Fix:** On the Flipper, go to **Settings → System → Expansion Modules** and
-set it to **None**.
+1. **WiFi Dev Board is seated on the Flipper's GPIO header.** The UART pins
+   (GPIO43 TX → Flipper Pin 14 RX, GPIO44 RX ← Flipper Pin 13 TX) are
+   only connected when the board is physically attached.
 
-Options you may see (varies by firmware version):
+2. **The Flipper MCP FAP is running.** The FAP takes exclusive control of the
+   UART when it starts (`expansion_disable()` + `furi_hal_serial_control_acquire`).
+   The ESP32 can only communicate when the FAP is open.
+
+3. **ESP32 firmware is flashed and running.** If you just flashed, make sure
+   the board is powered (either from Flipper GPIO or USB). Check the
+   Flipper's battery — low battery may not supply enough power.
+
+4. **Expansion Modules is set to None.** This is the **#1 gotcha**. On the
+   Flipper, go to **Settings → System → Expansion Modules → None**. If
+   enabled, the expansion protocol handler intercepts all UART data before
+   the FAP can read it.
+
+### FAP Status shows rx_bytes > 0 but "No status yet"
+
+Bytes are arriving but no STATUS messages are being parsed. This means the
+ESP32 is sending data but it's not in the expected protocol format. Possible
+causes:
+
+- **Wrong firmware flashed.** The ESP32 must be running the Flipper MCP
+  firmware (not BlackMagic, Marauder, or stock firmware).
+- **Baud rate mismatch.** Both sides must use 115200 baud.
+- **Garbage data.** Check the `last:` line on the Status screen for the last
+  raw line received. If it's garbled, it's likely a baud rate or electrical
+  issue.
+
+### FAP Status shows "needs_config"
+
+The ESP32 booted but has no WiFi credentials in NVS. Use one of:
+- **Load SD Config** — reads `config.txt` from SD and sends it via UART
+- **Configure WiFi** — enter credentials via the on-screen keyboard
+- Then select **Reboot Board** to apply
+
+### FAP Status shows "connecting_wifi" or "wifi_error"
+
+The ESP32 is trying to connect to WiFi but failing. Common causes:
+- Wrong SSID or password (SSIDs are case-sensitive)
+- Network is 5 GHz only (ESP32-S2 only supports 2.4 GHz)
+- Router is out of range
+- Too many clients on the network
+
+Use **View Logs** for more detail on the WiFi error. You can send new
+credentials via **Load SD Config** or **Configure WiFi** while the ESP32
+is in the retry loop — it accepts CONFIG messages during WiFi retry.
+
+### "No ACK" after sending a command
+
+The FAP sends a CMD over UART and waits up to 6 seconds for an ACK response
+from the ESP32. If no ACK arrives:
+
+- **Reboot command:** A brief "No ACK" is normal — the ESP32 restarts
+  immediately after sending the ACK, and the UART bytes may not reach the FAP
+  in time. Wait 10–30 seconds, then check Status again.
+- **Other commands:** The ESP32 may not be in the main loop yet (still
+  connecting to WiFi). Commands sent during WiFi retry get responses like
+  `err:wifi_not_connected`. Check View Logs for details.
+
+### Expansion Modules setting (detailed)
+
+Flipper firmware 0.97.0+ has an Expansion Modules feature that listens on the
+UART expansion port for the expansion protocol handshake. When enabled, it
+intercepts **all** UART data, preventing both the ESP32 and the FAP from
+communicating.
+
+The FAP disables the expansion handler on startup (`expansion_disable()`),
+but this only works if the setting is **None**. If set to "Listen UART USART"
+or "LPUART", the handler may re-engage.
+
 | Setting | Effect |
 |---------|--------|
-| **None** | UART passed straight to CLI — **use this** |
+| **None** | UART free for FAP to use — **required** |
 | Listen UART USART | Expansion protocol intercepts UART — breaks this project |
 | LPUART | Expansion protocol on low-power UART — also breaks this project |
 
-After changing the setting, reboot the ESP32 (or use the FAP's Reboot Board
-option). The status file should appear within a few seconds.
+### ESP32 reboots but FAP shows stale data
 
-### `UART smoke tests failed` or tools returning empty output
-Check the physical connection between the WiFi Dev Board and Flipper Zero:
-- The GPIO header must be fully seated
-- Flipper must be powered on
-- Flipper CLI must be accessible (not in a full-screen app)
-- **Expansion Modules must be set to None** (see above)
-
-### Commands timeout (`execute_command: timeout`)
-- Default timeout is 500ms — some commands (like `subghz rx`) take longer
-- The Flipper might be running a full-screen app that blocks the CLI
-- Try restarting the Flipper
-
-### `Storage error: File not found` for SD card config
-The SD card isn't inserted, or the path doesn't exist. The firmware enters the
-"waiting for config" loop until `config.txt` is created.
+When you close and reopen the FAP, all UART buffers are reset (rx_bytes
+returns to 0). This is expected — the FAP only accumulates data while it's
+running. Wait 5–30 seconds after opening the FAP for the ESP32's periodic
+STATUS push to arrive.
 
 ---
 

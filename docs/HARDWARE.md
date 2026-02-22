@@ -10,8 +10,10 @@
 ### WiFi Dev Board v1
 - Product: [Flipper Zero WiFi Dev Board](https://shop.flipperzero.one/products/wifi-devboard)
 - SoC: ESP32-S2-WROVER (Xtensa LX7, 4MB flash, 2MB PSRAM)
+- USB: **Native USB-OTG** (no USB-to-UART bridge chip) — requires manual bootloader entry for flashing
 - Connects via the Flipper Zero's GPIO expansion header
 - Has its own USB-C port for programming and serial monitoring
+- **Buttons on PCB:** BOOT (GPIO0) and RESET — used to enter download mode for flashing
 
 ---
 
@@ -52,12 +54,27 @@ These are the standard pins for the WiFi Dev Board v1 expansion header. They are
 
 | Task | Connect to | Notes |
 |------|-----------|-------|
-| Flash firmware | **WiFi Dev Board USB-C** | Board has its own USB connector |
-| Serial monitor | **WiFi Dev Board USB-C** | Same port as flashing |
+| Flash firmware | **WiFi Dev Board USB-C** | Must be in bootloader mode (BOOT + plug) |
+| Serial monitor | **WiFi Dev Board USB-C** | Only works when firmware is running (not bootloader) |
 | SD card config | **Flipper Zero** or SD reader | Mount SD card directly |
 | Normal use | Neither (WiFi only) | After setup, no USB needed |
 
 The Flipper Zero's USB-C port is for Flipper firmware, not for this project.
+
+### USB device identity
+
+The ESP32-S2 uses native USB-OTG. The USB device identity changes depending
+on the board's state:
+
+| State | USB descriptor | `/dev/ttyACM0` | Can flash? |
+|-------|---------------|----------------|-----------|
+| Firmware running | `Product: ESP32-S2` (CDC-ACM) | Yes — firmware console | No |
+| ROM bootloader | Different descriptor | Yes — bootloader | **Yes** |
+| Powered off / no USB | Not present | No | No |
+
+**Important:** Seeing `/dev/ttyACM0` does NOT mean you can flash. You must
+be in the ROM bootloader, which requires holding BOOT during power-on/reset.
+See [SETUP.md — Flashing](SETUP.md#flashing) for the full procedure.
 
 ---
 
@@ -77,11 +94,35 @@ This firmware targets the **v1 board** (ESP32-S2). The v2 board uses ESP32-S3 an
 
 ## Physical Setup
 
+### First-time flashing
+
+1. **Do NOT attach the WiFi Dev Board to the Flipper yet** — flash it separately
+2. Hold the **BOOT** button on the WiFi Dev Board
+3. While holding BOOT, plug a USB-C cable into the board's USB port
+4. Release BOOT after ~1 second — the board is now in bootloader mode
+5. Flash the firmware (see [SETUP.md — Flashing](SETUP.md#flashing))
+6. Unplug USB after flashing
+
+### Normal use (after firmware is flashed)
+
 1. Power off the Flipper Zero
 2. Seat the WiFi Dev Board onto the expansion header (top of Flipper)
 3. Power on the Flipper — the ESP32-S2 boots automatically
 4. **Disable Expansion Modules:** Go to **Settings → System → Expansion Modules → None**.
    Without this, the Flipper's expansion protocol handler intercepts UART data
-   and the ESP32 cannot communicate with the CLI. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#no-status-file-despite-esp32-running--expansion-modules-setting) for details.
-5. Connect the WiFi Dev Board USB-C to your computer for flashing
-6. After flashing, USB is optional — the board runs on Flipper power
+   and the FAP cannot communicate with the ESP32. See
+   [TROUBLESHOOTING.md](TROUBLESHOOTING.md#expansion-modules-setting-detailed) for details.
+5. Open the Flipper MCP app: **Apps → Tools → Flipper MCP**
+6. Use **Load SD Config** to send WiFi credentials to the ESP32
+7. Select **Reboot Board** to apply — the ESP32 connects to WiFi automatically
+
+After initial setup, USB is not needed — the board runs on Flipper power and
+communicates over WiFi.
+
+### Re-flashing (firmware updates)
+
+To flash a new firmware version:
+1. Remove the WiFi Dev Board from the Flipper
+2. Enter bootloader mode (BOOT + USB plug)
+3. Flash the new firmware
+4. Re-attach to Flipper — WiFi credentials are preserved in NVS
