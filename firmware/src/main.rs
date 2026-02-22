@@ -61,9 +61,9 @@ fn main() -> Result<()> {
     let settings_default = Settings::default();
     info!("Initializing UART at {} baud", settings_default.uart_baud_rate);
     let transport = UartTransport::new(
-        peripherals.uart1,
-        peripherals.pins.gpio1,
-        peripherals.pins.gpio2,
+        peripherals.uart0,
+        peripherals.pins.gpio43,
+        peripherals.pins.gpio44,
         settings_default.uart_baud_rate,
     )?;
     let fap = FapProtocol::new(transport);

@@ -79,6 +79,7 @@ typedef enum {
     MenuLogs,
     MenuTools,
     MenuRefresh,
+    MenuLoadSdConfig,
 } MenuItem;
 
 typedef enum {
@@ -128,6 +129,7 @@ typedef struct {
     volatile bool ack_received;
     volatile uint32_t rx_bytes;       /* debug: total bytes received from UART */
     volatile uint32_t rx_lines;       /* debug: total lines parsed */
+    char  last_raw[128];              /* debug: last raw line received */
     FuriMutex* data_mutex;            /* protects status/log/tools/ack buffers */
 } FlipperMcpApp;
 
@@ -260,6 +262,11 @@ static int32_t uart_worker_thread(void* context) {
                 if(line_pos > 0 && line_buf[line_pos - 1] == '\r') line_pos--;
                 line_buf[line_pos] = '\0';
                 app->rx_lines++;
+                /* Save last raw line for debug display */
+                furi_mutex_acquire(app->data_mutex, FuriWaitForever);
+                strncpy(app->last_raw, line_buf, sizeof(app->last_raw) - 1);
+                app->last_raw[sizeof(app->last_raw) - 1] = '\0';
+                furi_mutex_release(app->data_mutex);
                 uart_parse_line(app, line_buf);
                 line_pos = 0;
             }
@@ -332,9 +339,10 @@ static void action_show_status(FlipperMcpApp* app) {
     } else {
         snprintf(
             app->text_buf, TEXT_BUF_LEN - 1,
-            "No status yet.\nWaiting for ESP32...\n\nrx_bytes: %lu\nrx_lines: %lu\n\nIs the board powered?",
+            "No status yet.\n\nrx_bytes: %lu\nrx_lines: %lu\nlast: %.60s",
             (unsigned long)app->rx_bytes,
-            (unsigned long)app->rx_lines);
+            (unsigned long)app->rx_lines,
+            app->last_raw[0] ? app->last_raw : "(none)");
     }
     furi_mutex_release(app->data_mutex);
 }
@@ -496,6 +504,91 @@ static void action_save_config(FlipperMcpApp* app) {
             app->result,
             "Config saved to SD.\nNo ACK from ESP32.\nIs the board powered?",
             RESULT_BUF_LEN - 1);
+    }
+}
+
+/**
+ * Read config.txt from SD and send it as CONFIG message to ESP32 over UART.
+ */
+static void action_load_sd_config(FlipperMcpApp* app) {
+    char file_buf[512];
+    uint16_t n = read_file_to_buf(app, CONFIG_FILE, file_buf, sizeof(file_buf));
+    if(n == 0) {
+        strncpy(
+            app->result,
+            "No config.txt found\non SD card.\nUse Configure WiFi\nor create manually.",
+            RESULT_BUF_LEN - 1);
+        return;
+    }
+
+    /* Parse config.txt key=value lines into CONFIG pipe-delimited format */
+    char ssid[SSID_MAX_LEN] = {0};
+    char pass[PASS_MAX_LEN] = {0};
+    char device[64] = {0};
+    char relay[RELAY_MAX_LEN] = {0};
+
+    char* p = file_buf;
+    while(*p) {
+        char* nl_ptr = strchr(p, '\n');
+        if(nl_ptr) *nl_ptr = '\0';
+        /* Strip trailing \r */
+        size_t line_len = strlen(p);
+        if(line_len > 0 && p[line_len - 1] == '\r') p[line_len - 1] = '\0';
+
+        if(strncmp(p, "wifi_ssid=", 10) == 0)
+            strncpy(ssid, p + 10, sizeof(ssid) - 1);
+        else if(strncmp(p, "wifi_password=", 14) == 0)
+            strncpy(pass, p + 14, sizeof(pass) - 1);
+        else if(strncmp(p, "device_name=", 12) == 0)
+            strncpy(device, p + 12, sizeof(device) - 1);
+        else if(strncmp(p, "relay_url=", 10) == 0)
+            strncpy(relay, p + 10, sizeof(relay) - 1);
+
+        if(!nl_ptr) break;
+        p = nl_ptr + 1;
+    }
+
+    if(ssid[0] == '\0') {
+        strncpy(
+            app->result,
+            "config.txt has no\nwifi_ssid= entry.",
+            RESULT_BUF_LEN - 1);
+        return;
+    }
+
+    /* Build and send CONFIG message */
+    char config_line[384];
+    snprintf(
+        config_line, sizeof(config_line),
+        "CONFIG|ssid=%s|password=%s|device=%s|relay=%s",
+        ssid, pass, device[0] ? device : "flipper-mcp", relay);
+    uart_send(app, config_line);
+
+    /* Wait for ACK */
+    furi_mutex_acquire(app->data_mutex, FuriWaitForever);
+    app->ack_received = false;
+    furi_mutex_release(app->data_mutex);
+
+    bool got_ack = false;
+    for(int i = 0; i < 6; i++) {
+        furi_delay_ms(500);
+        if(app->ack_received) {
+            got_ack = true;
+            break;
+        }
+    }
+
+    if(got_ack) {
+        snprintf(
+            app->result, RESULT_BUF_LEN - 1,
+            "Config sent to ESP32!\nSSID: %.20s\nReboot Board to apply.",
+            ssid);
+        notification_message(app->notifications, &sequence_success);
+    } else {
+        snprintf(
+            app->result, RESULT_BUF_LEN - 1,
+            "Config sent (no ACK).\nSSID: %.20s",
+            ssid);
     }
 }
 
@@ -671,6 +764,12 @@ static void menu_cb(void* context, uint32_t index) {
         view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
         break;
 
+    case MenuLoadSdConfig:
+        action_load_sd_config(app);
+        app->current_view = ViewIdResult;
+        view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
+        break;
+
     default:
         break;
     }
@@ -792,7 +891,8 @@ int32_t flipper_mcp_app(void* p) {
     submenu_add_item(app->menu, "Configure WiFi",  MenuConfigure, menu_cb, app);
     submenu_add_item(app->menu, "View Logs",       MenuLogs,      menu_cb, app);
     submenu_add_item(app->menu, "Tools List",      MenuTools,     menu_cb, app);
-    submenu_add_item(app->menu, "Refresh Modules", MenuRefresh,   menu_cb, app);
+    submenu_add_item(app->menu, "Refresh Modules", MenuRefresh,      menu_cb, app);
+    submenu_add_item(app->menu, "Load SD Config",  MenuLoadSdConfig, menu_cb, app);
     view_dispatcher_add_view(
         app->view_dispatcher, ViewIdMenu, submenu_get_view(app->menu));
 

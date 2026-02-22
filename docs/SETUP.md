@@ -107,24 +107,39 @@ device_name=flipper-mcp
 relay_url=wss://relay.example.com/tunnel
 ```
 
-You can create this file in two ways:
+You can create this file and load it in several ways:
 
-### Option A: Flipper FAP Configure WiFi screen (easiest)
+### Option A: Edit SD card, then Load SD Config (recommended)
+
+1. Mount the Flipper's SD card on your PC (or use qFlipper / USB mass storage)
+2. Create/edit the file at `apps_data/flipper_mcp/config.txt` with a text editor
+3. Eject the SD card and put it back in the Flipper
+4. Open the Flipper MCP app: **Apps → Tools → Flipper MCP**
+5. Select **Load SD Config** — this reads config.txt and sends it to the ESP32
+6. Select **Reboot Board** to apply
+
+This is the easiest method because you can type on a real keyboard with full
+uppercase/special character support.
+
+### Option B: Flipper FAP Configure WiFi screen
 
 1. Open the Flipper MCP app: **Apps → Tools → Flipper MCP**
 2. Select **Configure WiFi**
-3. Enter your SSID (use the **^** key on the on-screen keyboard for uppercase)
+3. Enter your SSID (SSIDs are case-sensitive; the on-screen keyboard is
+   lowercase-only on some firmware versions)
 4. Enter your password
-5. Select **Reboot Board** to apply
+5. Optionally enter a relay URL
+6. Select **Reboot Board** to apply
 
-### Option B: Edit the SD card directly
+### Option C: Edit the SD card directly (no FAP needed)
 
-Mount the Flipper's SD card on your PC (or use the Flipper's USB mass storage
-mode) and create/edit the file at `apps_data/flipper_mcp/config.txt`.
+Mount the Flipper's SD card on your PC and create/edit the file at
+`apps_data/flipper_mcp/config.txt`. The ESP32 does not read this file
+directly — you must use **Load SD Config** in the FAP to send it over UART.
 
-If `config.txt` is missing or `wifi_ssid` is empty on boot, the ESP32 enters a
-**waiting-for-config** loop — it blinks the LED and writes `status=needs_config`
-to `status.txt`. Use the FAP's Configure WiFi screen to set credentials, then
+If `wifi_ssid` is empty in the ESP32's NVS on boot, it enters a
+**waiting-for-config** loop and sends `status=needs_config` to the FAP.
+Use **Load SD Config** or **Configure WiFi** to set credentials, then
 reboot the board.
 
 ---

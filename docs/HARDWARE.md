@@ -35,10 +35,12 @@ The firmware uses these pins for Flipper ↔ ESP32-S2 communication:
 
 | ESP32-S2 GPIO | Direction | Flipper Header Pin | Function |
 |--------------|-----------|-------------------|---------|
-| GPIO 1 | TX → | RX | UART transmit |
-| GPIO 2 | ← RX | TX | UART receive |
+| GPIO 43 | TX → | Pin 14 (RX) | UART transmit |
+| GPIO 44 | ← RX | Pin 13 (TX) | UART receive |
 | GND | — | GND | Common ground |
 | 3.3V / 5V | ← | Power | Supplied by Flipper |
+
+Note: GPIO 1/2 on the WiFi Dev Board v1 are SWD debug pins (SWCLK/SWDIO), not UART.
 
 Baud rate: **115200** (configurable via `uart_baud_rate` in config)
 
