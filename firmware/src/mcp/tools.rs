@@ -30,7 +30,7 @@ impl ToolRegistry {
         self.modules.refresh();
     }
 
-    /// Return all tool names, sorted alphabetically, for writing to tools.txt on the Flipper SD.
+    /// Return all tool names, sorted alphabetically, for pushing to the FAP over UART.
     pub fn list_tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> =
             self.modules.list_all_tools().into_iter().map(|t| t.name).collect();

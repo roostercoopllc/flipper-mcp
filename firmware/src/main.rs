@@ -111,19 +111,45 @@ fn main() -> Result<()> {
 
     // Step 7: Connect WiFi — STA mode only, with retry loop
     fap.push_status("status=connecting_wifi");
+    fap.push_log(&format!(
+        "WiFi: ssid='{}' pass_len={}",
+        settings.wifi_ssid,
+        settings.wifi_password.len()
+    ));
     let mut wifi = wifi::create_wifi(peripherals.modem, sys_loop, nvs_partition, &settings)?;
+
+    // Scan once before first connection attempt — push results to FAP
+    {
+        // start() needed before scan, then stop() so start_and_connect can start cleanly
+        let _ = wifi.start();
+        let scan_result = wifi::scan_aps(&mut wifi);
+        fap.push_log(&scan_result);
+        let _ = wifi.stop();
+    }
+
+    let mut wifi_attempt: u32 = 0;
     loop {
+        wifi_attempt += 1;
+        fap.push_log(&format!("WiFi attempt {}...", wifi_attempt));
         match wifi::start_and_connect(&mut wifi) {
             Ok(()) => break,
             Err(e) => {
-                error!("WiFi connect failed: {}. Retrying in 10s.", e);
-                let err_msg = e.to_string();
-                let err_short = if err_msg.len() > 80 {
-                    &err_msg[..80]
+                let err_full = format!("{:#}", e);
+                error!("WiFi attempt {} failed: {}", wifi_attempt, err_full);
+
+                // Push concise error to FAP — keep only the innermost error
+                let err_short = if let Some(pos) = err_full.rfind(": ") {
+                    &err_full[pos + 2..]
                 } else {
-                    &err_msg
+                    &err_full
                 };
-                fap.push_status(&format!("status=wifi_error|error={}", err_short));
+                let err_display = if err_short.len() > 60 {
+                    &err_short[..60]
+                } else {
+                    err_short
+                };
+                fap.push_log(&format!("#{} FAIL: {}", wifi_attempt, err_display));
+                fap.push_status(&format!("status=wifi_error|error={}", err_display));
 
                 // Poll for FAP messages while waiting to retry
                 for _ in 0..10 {
@@ -259,6 +285,7 @@ fn main() -> Result<()> {
         // After handling messages, or periodically, push status + logs
         let should_push = !messages.is_empty() || poll_count % STATUS_PUSH_EVERY == 0;
         if should_push {
+            log_buf.push(&format!("tick #{} msgs={}", poll_count, messages.len()));
             push_full_status(
                 &fap,
                 &device_ip,

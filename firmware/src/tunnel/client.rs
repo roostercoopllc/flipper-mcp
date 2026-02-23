@@ -21,7 +21,7 @@ const TUNNEL_STACK_SIZE: usize = 10240;
 /// are sent back over the same WebSocket connection.
 ///
 /// `relay_state` is set to `true` when the WebSocket is connected and `false` on
-/// disconnect or error — allowing `main.rs` to surface this in `status.txt`.
+/// disconnect or error — allowing `main.rs` to surface this in the STATUS push over UART.
 ///
 /// The thread handles reconnection automatically with exponential backoff (5s → 60s max).
 pub fn start_tunnel(relay_url: String, mcp_server: Arc<McpServer>, relay_state: Arc<AtomicBool>) {

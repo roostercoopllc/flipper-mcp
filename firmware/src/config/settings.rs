@@ -9,6 +9,9 @@ pub struct Settings {
     /// Optional WebSocket relay URL, e.g. `ws://relay.example.com:9090/tunnel`.
     /// Empty string disables the tunnel.
     pub relay_url: String,
+    /// WiFi auth method: "wpa2", "wpa3", "wpa2wpa3", "open".
+    /// Empty string = auto-detect (WPA2 if password set, open otherwise).
+    pub wifi_auth: String,
 }
 
 impl Default for Settings {
@@ -19,6 +22,7 @@ impl Default for Settings {
             uart_baud_rate: 115_200,
             device_name: "flipper-mcp".to_string(),
             relay_url: String::new(),
+            wifi_auth: String::new(),
         }
     }
 }
@@ -35,20 +39,24 @@ impl Settings {
             if let Some((key, value)) = pair.split_once('=') {
                 match key.trim() {
                     "ssid" => {
-                        self.wifi_ssid = value.to_string();
-                        info!("FAP config: wifi_ssid set");
+                        self.wifi_ssid = value.trim().to_string();
+                        info!("FAP config: wifi_ssid set (len={})", self.wifi_ssid.len());
                     }
                     "password" => {
-                        self.wifi_password = value.to_string();
-                        info!("FAP config: wifi_password set");
+                        self.wifi_password = value.trim().to_string();
+                        info!("FAP config: wifi_password set (len={})", self.wifi_password.len());
                     }
                     "device" | "device_name" => {
-                        self.device_name = value.to_string();
-                        info!("FAP config: device_name = {}", value);
+                        self.device_name = value.trim().to_string();
+                        info!("FAP config: device_name = {}", self.device_name);
                     }
                     "relay" | "relay_url" => {
-                        self.relay_url = value.to_string();
+                        self.relay_url = value.trim().to_string();
                         info!("FAP config: relay_url set");
+                    }
+                    "wifi_auth" | "auth" => {
+                        self.wifi_auth = value.trim().to_lowercase();
+                        info!("FAP config: wifi_auth = {}", self.wifi_auth);
                     }
                     _ => {
                         warn!("FAP config: unknown key: {}", key);

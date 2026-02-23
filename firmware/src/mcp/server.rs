@@ -131,7 +131,7 @@ impl McpServer {
     }
 
     /// Refresh dynamic modules and return all tool names.
-    /// Called from the main loop when "refresh_modules" appears in server.cmd.
+    /// Called from the main loop when "refresh_modules" command arrives over UART.
     pub fn refresh_and_list_tools(&self) -> Vec<String> {
         self.tools.refresh_dynamic();
         self.tools.list_tool_names()

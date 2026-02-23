@@ -57,6 +57,10 @@ impl NvsConfig {
             settings.relay_url = url;
             info!("NVS: relay_url loaded");
         }
+        if let Some(auth) = self.read_str("wifi_auth") {
+            settings.wifi_auth = auth;
+            info!("NVS: wifi_auth loaded");
+        }
     }
 
     /// Persist current settings to NVS.
@@ -65,6 +69,7 @@ impl NvsConfig {
         self.write_str("wifi_pass", &settings.wifi_password)?;
         self.write_str("device_name", &settings.device_name)?;
         self.write_str("relay_url", &settings.relay_url)?;
+        self.write_str("wifi_auth", &settings.wifi_auth)?;
         info!("NVS: settings saved");
         Ok(())
     }

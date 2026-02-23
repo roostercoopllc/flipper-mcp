@@ -27,3 +27,8 @@ pub fn start_and_connect(wifi: &mut BlockingWifi<EspWifi<'static>>) -> Result<()
 pub fn reconfigure(wifi: &mut BlockingWifi<EspWifi<'static>>, settings: &Settings) -> Result<()> {
     station::reconfigure(wifi, settings)
 }
+
+/// Scan for visible APs. Returns summary string for logging.
+pub fn scan_aps(wifi: &mut BlockingWifi<EspWifi<'static>>) -> String {
+    station::scan_aps(wifi)
+}
