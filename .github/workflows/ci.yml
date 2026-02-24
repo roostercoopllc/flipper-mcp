@@ -22,6 +22,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: xtensa-esp32s2-espidf
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -72,12 +73,14 @@ jobs:
             gperf ccache cmake ninja-build libffi-dev libssl-dev \
             dfu-util libusb-1.0-0
 
+      - name: Install espup
+        run: cargo install espup
+
       - name: Install Xtensa Rust toolchain
-        uses: esp-rs/xtensa-toolchain@v1
-        with:
-          default: true
-          version: latest
-          ldproxy: false
+        run: |
+          ESP_IDF_TOOLS_PATH=$HOME/.esp espup install
+          echo "$HOME/.esp/esp-idf/tools" >> $GITHUB_PATH
+          echo "$HOME/.esp/xtensa-esp32s2-elf/bin" >> $GITHUB_PATH
 
       - name: Cache cargo registry
         uses: actions/cache@v4
