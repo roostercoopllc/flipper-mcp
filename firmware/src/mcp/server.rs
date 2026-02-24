@@ -28,14 +28,20 @@ impl McpServer {
     }
 
     /// Handle a JSON-RPC request body. Returns None for notifications (202 response),
-    /// Some(json) for requests that need a response.
-    pub fn handle_request(&self, body: &str) -> Option<String> {
+    /// Some(response) for requests that need a response.
+    ///
+    /// The caller is responsible for serialization — use `serde_json::to_writer` to
+    /// stream directly to the HTTP response (avoids OOM on ESP32-S2).
+    pub fn handle_request(&self, body: &str) -> Option<JsonRpcResponse> {
         let request: JsonRpcRequest = match serde_json::from_str(body) {
             Ok(req) => req,
             Err(e) => {
                 warn!("Failed to parse JSON-RPC request: {}", e);
-                let resp = error_response(Value::Null, PARSE_ERROR, format!("Parse error: {}", e));
-                return Some(serde_json::to_string(&resp).unwrap_or_default());
+                return Some(error_response(
+                    Value::Null,
+                    PARSE_ERROR,
+                    format!("Parse error: {}", e),
+                ));
             }
         };
 
@@ -48,8 +54,12 @@ impl McpServer {
             }
         };
 
-        let response = self.dispatch(id, &request.method, &request.params);
-        Some(serde_json::to_string(&response).unwrap_or_default())
+        Some(self.dispatch(id, &request.method, &request.params))
+    }
+
+    /// Return full tool definitions for OpenAPI spec generation.
+    pub fn list_tool_definitions(&self) -> Vec<super::types::ToolDefinition> {
+        self.tools.list_tool_definitions()
     }
 
     fn dispatch(&self, id: Value, method: &str, params: &Option<Value>) -> JsonRpcResponse {

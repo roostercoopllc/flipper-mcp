@@ -109,7 +109,8 @@ pub fn register_sse_handlers(
         let body_str = std::str::from_utf8(&body).unwrap_or("");
 
         // Process the JSON-RPC request and enqueue the response
-        if let Some(response_json) = mcp_server.handle_request(body_str) {
+        if let Some(response) = mcp_server.handle_request(body_str) {
+            let response_json = serde_json::to_string(&response).unwrap_or_default();
             if let Some(sid) = session_id {
                 let mut s = sessions_post.lock().unwrap();
                 if let Some(queue) = s.get_mut(&sid) {

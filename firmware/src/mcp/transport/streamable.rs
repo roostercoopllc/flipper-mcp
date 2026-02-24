@@ -7,10 +7,31 @@ use esp_idf_svc::io::Write;
 use log::info;
 
 use crate::mcp::server::McpServer;
+use crate::mcp::types::ToolDefinition;
 
 use super::sse::{register_sse_handlers, SseState};
 
 const MAX_REQUEST_BODY: usize = 16384; // 16KB
+
+/// Adapter: wraps an `esp_idf_svc::io::Write` implementor as a `std::io::Write`
+/// so that `serde_json::to_writer` can stream JSON directly to the HTTP response.
+struct StdIoWriter<W>(W);
+
+impl<W: Write> std::io::Write for StdIoWriter<W>
+where
+    W::Error: std::fmt::Display,
+{
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .write(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0
+            .flush()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+}
 
 pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<EspHttpServer<'static>> {
     let config = Configuration {
@@ -46,10 +67,15 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
         let body_str = std::str::from_utf8(&body).unwrap_or("");
 
         match server_post.handle_request(body_str) {
-            Some(response_json) => {
-                request
-                    .into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
-                    .write_all(response_json.as_bytes())?;
+            Some(response) => {
+                // Stream serialization directly to the HTTP response — avoids
+                // allocating the full JSON string in memory (fixes OOM on tools/list
+                // with 30+ tools on ESP32-S2's 320KB heap).
+                let resp = request
+                    .into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
+                let mut writer = StdIoWriter(resp);
+                serde_json::to_writer(&mut writer, &response)
+                    .map_err(|e| anyhow::anyhow!("JSON serialization: {e}"))?;
             }
             None => {
                 request.into_response(202, Some("Accepted"), &[])?;
@@ -80,9 +106,75 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
     })
     .map_err(|e| anyhow::anyhow!("Failed to register GET /health: {e}"))?;
 
+    // GET /openapi.json — dynamic OpenAPI spec for tool discovery
+    let server_openapi = server.clone();
+    http.fn_handler::<anyhow::Error, _>("/openapi.json", Method::Get, move |request| {
+        let tools = server_openapi.list_tool_definitions();
+        let resp = request.into_response(
+            200,
+            Some("OK"),
+            &[
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*"),
+            ],
+        )?;
+        let mut writer = StdIoWriter(resp);
+        write_openapi_spec(&mut writer, &tools)?;
+        Ok(())
+    })
+    .map_err(|e| anyhow::anyhow!("Failed to register GET /openapi.json: {e}"))?;
+
     // Legacy SSE handlers: GET /sse and POST /messages
     register_sse_handlers(&mut http, server, sse_state)?;
 
-    info!("HTTP server ready — POST /mcp, GET /health, GET /sse, POST /messages");
+    info!("HTTP server ready — POST /mcp, GET /health, GET /openapi.json, GET /sse, POST /messages");
     Ok(http)
+}
+
+/// Write an OpenAPI 3.1 spec to a `std::io::Write` stream, serializing one tool
+/// at a time to avoid allocating the entire spec in memory (~20KB for 30 tools).
+fn write_openapi_spec(w: &mut impl std::io::Write, tools: &[ToolDefinition]) -> Result<()> {
+    // --- Header ---
+    w.write_all(concat!(
+        r#"{"openapi":"3.1.0","info":{"title":"Flipper MCP Server","#,
+        r#""description":"Model Context Protocol server on Flipper Zero WiFi Dev Board (ESP32-S2). "#,
+        r#"Exposes Flipper Zero hardware as MCP tools.","#,
+        r#""version":""#,
+    ).as_bytes())?;
+    w.write_all(env!("CARGO_PKG_VERSION").as_bytes())?;
+    w.write_all(b"\"},")?;
+
+    // --- Paths ---
+    w.write_all(concat!(
+        r#""paths":{"#,
+        // /health
+        r#""/health":{"get":{"operationId":"healthCheck","summary":"Health check","#,
+        r#""responses":{"200":{"description":"Server is running","content":{"application/json":{"#,
+        r#""schema":{"type":"object","properties":{"status":{"type":"string"},"version":{"type":"string"}}}}}}}}},"#,
+        // /mcp
+        r#""/mcp":{"post":{"operationId":"mcpJsonRpc","#,
+        r#""summary":"MCP JSON-RPC 2.0 endpoint (Streamable HTTP transport)","#,
+        r#""description":"Send JSON-RPC 2.0 requests. Methods: initialize, tools/list, tools/call, resources/list","#,
+        r#""requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","#,
+        r#""required":["jsonrpc","method"],"properties":{"jsonrpc":{"type":"string","const":"2.0"},"#,
+        r#""id":{},"method":{"type":"string","enum":["initialize","tools/list","tools/call","resources/list"]},"#,
+        r#""params":{"type":"object"}}}}}},"#,
+        r#""responses":{"200":{"description":"JSON-RPC response"},"202":{"description":"Notification accepted"}}}},"#,
+        // /openapi.json
+        r#""/openapi.json":{"get":{"operationId":"openApiSpec","summary":"OpenAPI specification (this document)","#,
+        r#""responses":{"200":{"description":"OpenAPI 3.1 JSON"}}}}},"#,
+    ).as_bytes())?;
+
+    // --- x-mcp-tools: stream one tool definition at a time ---
+    w.write_all(b"\"x-mcp-tools\":[")?;
+    for (i, tool) in tools.iter().enumerate() {
+        if i > 0 {
+            w.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *w, tool)
+            .map_err(|e| anyhow::anyhow!("tool serialization: {e}"))?;
+    }
+    w.write_all(b"]}")?;
+
+    Ok(())
 }
