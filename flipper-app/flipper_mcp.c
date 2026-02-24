@@ -143,6 +143,7 @@ typedef struct {
     volatile uint32_t rx_lines;       /* debug: total lines parsed */
     char  last_raw[128];              /* debug: last raw line received */
     FuriMutex* data_mutex;            /* protects status/log/tools/ack buffers */
+    volatile bool esp_ready;          /* set true when PONG received from ESP32 */
 } FlipperMcpApp;
 
 // -- UART helpers -------------------------------------------------------------
@@ -540,12 +541,27 @@ static void cli_dispatch(FlipperMcpApp* app, const char* command) {
         ok = false;
     }
 
-    /* Escape newlines and send response */
-    char escaped[1024];
-    escape_newlines(result, escaped, sizeof(escaped));
-    char response[1100];
-    snprintf(response, sizeof(response), "%s|%s", ok ? "CLI_OK" : "CLI_ERR", escaped);
+    /* Escape newlines and send response — use heap to avoid stack overflow */
+    size_t result_len = strlen(result);
+    size_t escaped_size = result_len * 2 + 1; /* worst case: every char is \n */
+    if(escaped_size < 128) escaped_size = 128;
+    char* escaped = malloc(escaped_size);
+    if(!escaped) {
+        uart_send(app, "CLI_ERR|out of memory");
+        return;
+    }
+    escape_newlines(result, escaped, escaped_size);
+    size_t response_size = strlen(escaped) + 16;
+    char* response = malloc(response_size);
+    if(!response) {
+        uart_send(app, "CLI_ERR|out of memory");
+        free(escaped);
+        return;
+    }
+    snprintf(response, response_size, "%s|%s", ok ? "CLI_OK" : "CLI_ERR", escaped);
     uart_send(app, response);
+    free(response);
+    free(escaped);
 }
 
 /* Forward declaration — defined further down in the file */
@@ -553,24 +569,38 @@ static bool write_file_str(FlipperMcpApp* app, const char* path, const char* con
 
 /** Handle WRITE_FILE|path|content from ESP32 */
 static void handle_write_file(FlipperMcpApp* app, const char* payload) {
-    /* payload = "path|escaped_content" */
-    char payload_copy[4096];
-    strncpy(payload_copy, payload, sizeof(payload_copy) - 1);
-    payload_copy[sizeof(payload_copy) - 1] = '\0';
+    /* payload = "path|escaped_content" — use heap to avoid stack overflow */
+    size_t payload_len = strlen(payload);
+    size_t alloc_size = payload_len + 1;
+    if(alloc_size > 4096) alloc_size = 4096;
+
+    char* payload_copy = malloc(alloc_size);
+    if(!payload_copy) {
+        uart_send(app, "CLI_ERR|out of memory");
+        return;
+    }
+    strncpy(payload_copy, payload, alloc_size - 1);
+    payload_copy[alloc_size - 1] = '\0';
 
     char* pipe = strchr(payload_copy, '|');
     if(!pipe) {
         uart_send(app, "CLI_ERR|Invalid WRITE_FILE format (no pipe)");
+        free(payload_copy);
         return;
     }
     *pipe = '\0';
     const char* path = payload_copy;
     const char* escaped_content = pipe + 1;
 
-    /* Unescape \\n -> \n */
-    char content[4096];
+    /* Unescape \\n -> \n — allocate on heap */
+    char* content = malloc(alloc_size);
+    if(!content) {
+        uart_send(app, "CLI_ERR|out of memory");
+        free(payload_copy);
+        return;
+    }
     size_t ci = 0;
-    for(size_t i = 0; escaped_content[i] && ci + 1 < sizeof(content); i++) {
+    for(size_t i = 0; escaped_content[i] && ci + 1 < alloc_size; i++) {
         if(escaped_content[i] == '\\' && escaped_content[i + 1] == 'n') {
             content[ci++] = '\n';
             i++; /* skip the 'n' */
@@ -597,6 +627,9 @@ static void handle_write_file(FlipperMcpApp* app, const char* payload) {
     } else {
         uart_send(app, "CLI_ERR|write failed");
     }
+
+    free(content);
+    free(payload_copy);
 }
 
 /** Parse a complete line received from ESP32. Called by the worker thread. */
@@ -677,7 +710,8 @@ static void uart_parse_line(FlipperMcpApp* app, const char* line) {
         FURI_LOG_D(TAG, "ACK: %s", app->ack_buf);
 
     } else if(strncmp(line, "PONG", 4) == 0) {
-        FURI_LOG_D(TAG, "PONG received");
+        app->esp_ready = true;
+        FURI_LOG_I(TAG, "PONG received — ESP32 handshake complete");
 
     } else if(strncmp(line, "CLI|", 4) == 0) {
         /* CLI relay: execute command and send response.
@@ -705,10 +739,21 @@ static int32_t uart_worker_thread(void* context) {
     FlipperMcpApp* app = context;
     char line_buf[LINE_BUF_SIZE];
     size_t line_pos = 0;
+    uint32_t last_ping_tick = 0;
 
     FURI_LOG_I(TAG, "UART worker started");
 
     while(app->worker_running) {
+        /* Send PING every 2s until ESP32 responds with PONG */
+        if(!app->esp_ready) {
+            uint32_t now = furi_get_tick();
+            if(now - last_ping_tick >= 2000) {
+                uart_send(app, "PING");
+                last_ping_tick = now;
+                FURI_LOG_D(TAG, "PING sent (waiting for ESP32 handshake)");
+            }
+        }
+
         uint8_t byte;
         size_t received = furi_stream_buffer_receive(app->rx_stream, &byte, 1, 100);
         if(received == 0) continue;
@@ -1283,13 +1328,11 @@ static void uart_init(FlipperMcpApp* app) {
     /* Start worker thread */
     app->worker_running = true;
     app->data_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
-    app->uart_worker = furi_thread_alloc_ex("McpUartWorker", 2048, uart_worker_thread, app);
+    app->uart_worker = furi_thread_alloc_ex("McpUartWorker", 8192, uart_worker_thread, app);
     furi_thread_start(app->uart_worker);
 
     FURI_LOG_I(TAG, "UART initialized at %d baud", UART_BAUD_RATE);
-
-    /* Send initial PING to let ESP32 know we're alive */
-    uart_send(app, "PING");
+    /* Worker thread will send periodic PINGs until ESP32 replies with PONG */
 }
 
 static void uart_cleanup(FlipperMcpApp* app) {
