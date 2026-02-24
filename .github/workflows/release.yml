@@ -49,7 +49,7 @@ jobs:
 
       - name: Install ESP-IDF toolchain
         run: |
-          espup install --toolchain-dir $HOME/.esp
+          ESP_IDF_TOOLS_PATH=$HOME/.esp espup install
           echo "$HOME/.esp/esp-idf/tools" >> $GITHUB_PATH
 
       - name: Install ufbt
