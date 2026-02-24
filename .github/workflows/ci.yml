@@ -22,7 +22,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: xtensa-esp32s2-espidf
 
       - name: Cache cargo registry
         uses: actions/cache@v4
