@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 0.1.0). Leave empty to auto-detect from Cargo.toml'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run (show what would be done without publishing)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git tags
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Install ESP-IDF dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-dev \
+            python3-venv \
+            cmake \
+            ninja-build \
+            libssl-dev \
+            pkg-config \
+            git
+
+      - name: Install espup
+        run: cargo install espup
+
+      - name: Install ESP-IDF toolchain
+        run: |
+          espup install --toolchain-dir $HOME/.esp
+          echo "$HOME/.esp/esp-idf/tools" >> $GITHUB_PATH
+
+      - name: Install ufbt
+        run: python3 -m pip install --upgrade ufbt
+
+      - name: Build release
+        run: |
+          source $HOME/.esp/esp-idf/export.sh
+          chmod +x ./scripts/release.sh
+
+          # Set version if provided
+          VERSION_ARG=""
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION_ARG="--version ${{ inputs.version }}"
+          fi
+
+          # Set dry-run if requested
+          DRY_RUN_ARG=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            DRY_RUN_ARG="--dry-run"
+          fi
+
+          ./scripts/release.sh $VERSION_ARG $DRY_RUN_ARG
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flipper-mcp-build
+          path: dist/
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -d dist ]; then
+            echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+            ls -lh dist/ >> $GITHUB_STEP_SUMMARY
+          fi
