@@ -135,16 +135,16 @@ For detailed troubleshooting, see [TROUBLESHOOTING.md — Flash Issues](TROUBLES
 
 Before using the WiFi Dev Board with this firmware, you **must** disable the
 Flipper's expansion module protocol handler. If left enabled, it intercepts all
-UART data and the ESP32 cannot communicate with the Flipper CLI.
+UART data and the ESP32 cannot communicate with the FAP.
 
 **On the Flipper Zero:**
 1. Go to **Settings → System → Expansion Modules**
 2. Set to **None**
 
 > **Symptom if skipped:** The firmware flashes and boots fine, but the FAP
-> shows "No status file — is ESP32 powered and running firmware?" because
-> the ESP32's UART commands are silently swallowed by the expansion protocol
-> handler instead of reaching the CLI shell.
+> shows "No status yet" with `rx_bytes: 0` because the ESP32's UART messages
+> are silently swallowed by the expansion protocol handler instead of
+> reaching the FAP.
 
 ---
 
@@ -154,9 +154,23 @@ Create `/ext/apps_data/flipper_mcp/config.txt` on the Flipper's SD card:
 ```
 wifi_ssid=YourNetwork
 wifi_password=YourPassword
+wifi_auth=wpa2
 device_name=flipper-mcp
 relay_url=wss://relay.example.com/tunnel
 ```
+
+**`wifi_auth` values:**
+
+| Value | Auth Method |
+|-------|-------------|
+| `wpa2` | WPA2-Personal (recommended default) |
+| `wpa3` | WPA3-Personal |
+| `wpa2wpa3` | WPA2/WPA3 transition mode |
+| `open` | No authentication (open network) |
+| *(empty/omitted)* | Auto — WPA2 if password set, open otherwise |
+
+> **Tip:** Most home routers use WPA2. If you're unsure, start with `wifi_auth=wpa2`.
+> If connection times out, try `wpa2wpa3`. The ESP32-S2 has limited WPA3 support.
 
 You can create this file and load it in several ways:
 
@@ -195,28 +209,99 @@ reboot the board.
 
 ---
 
-## First Connection
+## Verifying WiFi with Serial Monitor
 
-After the device connects to WiFi, the serial monitor shows:
+Before testing the MCP server, verify that the ESP32 connects to WiFi
+successfully. The USB serial monitor shows ESP-IDF's internal WiFi logs —
+this is the best way to diagnose connection issues.
+
+### Setup
+
+The ESP32-S2's console output goes to USB CDC (`/dev/ttyACM0`). You can
+monitor it while the board is attached to the Flipper:
+
+1. Seat the WiFi Dev Board on the Flipper's GPIO header
+2. **Also** connect a USB-C cable from the board to your PC
+3. Power on the Flipper
+4. Open a serial terminal:
+   ```bash
+   picocom -b 115200 /dev/ttyACM0
+   # Or: screen /dev/ttyACM0 115200
+   # Or: minicom -D /dev/ttyACM0 -b 115200
+   ```
+
+> **Note:** `espflash monitor` does not work reliably with ESP32-S2 USB-OTG.
+> Use `picocom`, `screen`, or `minicom` instead.
+
+> **Tip:** If you see no output, the board may have booted before the terminal
+> was opened. Press the RESET button on the board (or power-cycle the Flipper)
+> while the terminal is open. The firmware waits 2 seconds at startup so early
+> messages aren't lost.
+
+### What to look for
+
+**Successful connection:**
 ```
 === Flipper MCP Firmware v0.1.0 ===
-WiFi connected. IP: 192.168.1.xxx
-HTTP server ready — POST /mcp, GET /health, GET /sse, POST /messages
-mDNS: advertising flipper-mcp.local:8080
+NVS: wifi_ssid loaded
+NVS: wifi_password loaded
+WiFi auth: WPA2Personal (config='wpa2')
+WiFi started
+WiFi connected
+WiFi connected — IP: 192.168.1.xxx
+HTTP server started
 Firmware ready. MCP server listening on :8080
 ```
 
-Test the connection:
+**Failed connection (timeout):**
+```
+WiFi auth: WPA2Personal (config='wpa2')
+WiFi started
+WiFi connect failed: ESP_ERR_TIMEOUT. Retrying in 10s.
+```
+
+If WiFi times out repeatedly, check:
+- SSID and password are correct (case-sensitive)
+- Network is **2.4 GHz** (ESP32-S2 does not support 5 GHz)
+- Try `wifi_auth=wpa2wpa3` in config.txt if your router uses WPA3
+- Try a phone hotspot with a simple SSID/password to isolate router issues
+
+### Exit the serial monitor
+
+| Tool | Exit shortcut |
+|------|---------------|
+| picocom | `Ctrl-A` then `Ctrl-X` |
+| screen | `Ctrl-A` then `K` |
+| minicom | `Ctrl-A` then `X` |
+
+---
+
+## First Connection
+
+After confirming WiFi is connected (via serial monitor or FAP Status screen),
+test the MCP server:
+
 ```bash
-curl http://flipper-mcp.local:8080/health
-# or by IP:
+# Health check (use the IP from serial output or FAP Status):
 curl http://192.168.1.xxx:8080/health
 
-# Test MCP:
-curl -X POST http://flipper-mcp.local:8080/mcp \
+# If mDNS is available:
+curl http://flipper-mcp.local:8080/health
+
+# Test MCP initialize:
+curl -X POST http://192.168.1.xxx:8080/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}'
+
+# List available tools:
+curl -X POST http://192.168.1.xxx:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 ```
+
+> **If health check fails:** Verify your PC can reach the ESP32 with
+> `ping 192.168.1.xxx`. If ping fails, check your router for AP/client
+> isolation settings that block device-to-device traffic.
 
 ---
 

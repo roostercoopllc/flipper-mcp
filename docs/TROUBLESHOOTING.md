@@ -236,23 +236,69 @@ espflash erase-flash
 
 ## WiFi Issues
 
+### Debugging WiFi with the serial monitor
+
+The USB serial monitor is the best tool for diagnosing WiFi problems. It shows
+ESP-IDF's internal WiFi driver logs with details not available through the FAP.
+
+```bash
+# Connect USB to the WiFi Dev Board (can be on the Flipper at the same time)
+picocom -b 115200 /dev/ttyACM0
+```
+
+See [SETUP.md — Verifying WiFi with Serial Monitor](SETUP.md#verifying-wifi-with-serial-monitor)
+for full setup instructions. Key things to look for:
+
+| Serial output | Meaning |
+|----------------|---------|
+| `WiFi started` then nothing | Radio started but can't find the AP — wrong SSID or out of range |
+| `WiFi connect failed: ESP_ERR_TIMEOUT` | AP found but handshake timed out — wrong password, auth mismatch, or weak signal |
+| `WiFi connect failed: ESP_ERR_WIFI_SSID` | SSID not found in scan results |
+| `WiFi connected — IP: x.x.x.x` | Success — proceed to test the MCP server |
+
 ### ESP32 stuck in "needs_config" loop
-No WiFi credentials found. Create `config.txt` on the Flipper's SD card:
-1. Use the FAP: **Apps → Tools → Flipper MCP → Configure WiFi**
-2. Or manually create `/ext/apps_data/flipper_mcp/config.txt` with `wifi_ssid=...` and `wifi_password=...`
-3. Reboot the ESP32 after saving
+No WiFi credentials found in NVS. Create `config.txt` on the Flipper's SD card:
+1. Use the FAP: **Apps → Tools → Flipper MCP → Load SD Config**
+2. Or: **Configure WiFi** to enter credentials via on-screen keyboard
+3. Select **Reboot Board** to apply
+
+### WiFi connection times out (`ESP_ERR_TIMEOUT`)
+
+The ESP32 can see the network but can't complete the WPA handshake. Try these
+in order:
+
+1. **Check the password** — SSIDs and passwords are case-sensitive
+2. **Verify 2.4 GHz** — the ESP32-S2 does NOT support 5 GHz. If your router
+   uses a combined SSID, set up a separate 2.4 GHz-only network
+3. **Try a different `wifi_auth` value** — add `wifi_auth=wpa2wpa3` to
+   config.txt, then Load SD Config + Reboot Board
+4. **Test with a phone hotspot** — create a 2.4 GHz hotspot with a simple
+   SSID (no spaces), WPA2, and a short password. This isolates router issues
+5. **Erase flash and reflash** — clears stale NVS data from previous firmware:
+   ```bash
+   espflash erase-flash
+   # Re-enter bootloader, then:
+   espflash flash --no-stub target/xtensa-esp32s2-espidf/release/flipper-mcp
+   ```
+   You'll need to re-send WiFi config via Load SD Config after erasing
 
 ### Device connected to WiFi but can't be reached
+
 ```bash
-# Find the IP from serial monitor
-./scripts/monitor.sh
-# Look for: "WiFi connected. IP: 192.168.x.xxx"
+# Ping the ESP32's IP (shown on FAP Status or serial monitor)
+ping 192.168.x.xxx
 
-# Or check your router's DHCP client list
-
-# Test health endpoint
-curl http://192.168.x.xxx:8080/health
+# If "Destination Host Unreachable":
+# → AP/client isolation is enabled on your router, OR
+# → The WiFi connection dropped after the initial connect
 ```
+
+**Fix:** Check your router's settings for "AP isolation", "client isolation",
+or "wireless isolation" and disable it. Some guest networks have this enabled
+by default.
+
+If your PC is on Ethernet and the ESP32 is on WiFi, some routers don't bridge
+between wired and wireless. Try accessing from another WiFi device instead.
 
 ### `flipper-mcp.local` not resolving
 mDNS either isn't built in or isn't working on your OS.
@@ -365,6 +411,35 @@ STATUS push to arrive.
 
 ## Serial Monitor Issues (Linux)
 
+### Recommended serial monitor tools
+
+The ESP32-S2 uses **USB CDC** for console output (not a UART bridge). Use a
+plain serial terminal — `espflash monitor` does not work reliably:
+
+```bash
+# Recommended:
+picocom -b 115200 /dev/ttyACM0
+
+# Alternatives:
+screen /dev/ttyACM0 115200
+minicom -D /dev/ttyACM0 -b 115200
+```
+
+> **Note:** Baud rate doesn't technically matter for USB CDC (it's native USB),
+> but the tools require a value. Use 115200 for convention.
+
+### `FATAL: read zero bytes from port` / `term_exitfunc: reset failed`
+
+This happens when the USB CDC device disappears — typically because the ESP32
+reset (RESET button pressed, power cycle, or crash). During reset, the USB
+device is momentarily disconnected.
+
+**Fix:** This is expected behavior. After the reset, wait 2–3 seconds for the
+board to re-enumerate, then reconnect:
+```bash
+picocom -b 115200 /dev/ttyACM0
+```
+
 ### `screen` or `espflash monitor` immediately terminates on `/dev/ttyACM0`
 
 **ModemManager** (installed by default on many Linux distros) probes new USB CDC
@@ -380,18 +455,42 @@ sudo systemctl disable ModemManager
 
 Then unplug and re-plug the USB cable (or reset the board) and try again.
 
-### `espflash monitor` shows `Protocol error` after RESET
+### `espflash monitor` shows `Communication error` or `Protocol error`
 
-`espflash monitor` expects the ESP-IDF boot stub protocol. On the ESP32-S2 with
-USB CDC, the running firmware doesn't speak this protocol. Use a plain serial
-terminal instead:
-```bash
-screen /dev/ttyACM0 115200
-# Press Ctrl+A then K to exit screen
-```
+`espflash monitor` tries to use the flash stub protocol, which doesn't work
+with ESP32-S2 USB-OTG. Use `picocom`, `screen`, or `minicom` instead (see
+above).
 
-Note: USB CDC console output requires `CONFIG_ESP_CONSOLE_USB_CDC=y` in
-`sdkconfig.defaults` and a clean rebuild (`cargo clean`).
+### No output on serial monitor
+
+If the serial terminal connects but shows no output:
+
+1. **Board may have already booted.** Press the RESET button while the terminal
+   is open, or power-cycle the Flipper. The firmware waits 2 seconds at startup
+   to allow USB CDC to enumerate.
+
+2. **USB CDC not enabled.** Verify `CONFIG_ESP_CONSOLE_USB_CDC=y` is in
+   `sdkconfig.defaults` and do a clean rebuild:
+   ```bash
+   cd firmware && cargo clean && cargo build --release --target xtensa-esp32s2-espidf
+   ```
+
+3. **Board is in bootloader mode.** If you held BOOT while plugging in,
+   the firmware isn't running. Unplug and replug without holding BOOT.
+
+### Serial monitor vs FAP UART
+
+The USB serial monitor and the FAP communicate on **different channels**:
+
+| Channel | Purpose | What you see |
+|---------|---------|--------------|
+| USB CDC (`/dev/ttyACM0`) | ESP-IDF console logs | `info!()`, `error!()`, WiFi driver output |
+| UART0 (GPIO43/44) | FAP ↔ ESP32 protocol | STATUS, LOG, TOOLS, ACK, CMD messages |
+
+FAP commands (Load SD Config, Reboot Board, etc.) go over UART and won't
+appear on the USB serial monitor. However, the **effects** are logged — for
+example, "FAP config: wifi_ssid set" appears on USB CDC when Load SD Config
+is received over UART.
 
 ---
 

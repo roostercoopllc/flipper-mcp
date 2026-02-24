@@ -20,6 +20,21 @@ CONFIG_MDNS_ENABLED=y
 # WebSocket client — tunnel connection to relay server
 CONFIG_ESP_WEBSOCKET_CLIENT=y
 
+# WiFi — increase buffers and disable power save for reliable connections
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=y
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=y
+CONFIG_ESP_WIFI_NVS_ENABLED=y
+# Disable WiFi power save — can cause connection timeouts on ESP32-S2
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
+
+# Log level — DEBUG for WiFi driver diagnostics (WPA handshake, scan results)
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+CONFIG_LOG_MAXIMUM_LEVEL=4
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
 # Route ESP-IDF logs to USB CDC so /dev/ttyACM0 stays alive after boot.
 # Without this, logs go to UART0 (GPIO43/44) and the USB port disappears
 # once the application starts — making it impossible to see firmware output.

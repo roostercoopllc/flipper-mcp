@@ -46,6 +46,9 @@ fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
     EspLogger::initialize_default();
 
+    // Give USB CDC time to enumerate so early logs aren't lost
+    thread::sleep(Duration::from_secs(2));
+
     info!("=== Flipper MCP Firmware v{} ===", env!("CARGO_PKG_VERSION"));
 
     // Step 2: Take hardware peripherals and system services
@@ -104,12 +107,25 @@ fn main() -> Result<()> {
             }
         }
         if settings.wifi_ssid.is_empty() {
+            info!("Still waiting for WiFi config from FAP...");
             thread::sleep(Duration::from_secs(5));
             fap.push_status("status=needs_config");
         }
     }
 
     // Step 7: Connect WiFi — STA mode only, with retry loop
+    // Enable verbose WiFi driver logging for handshake diagnostics
+    unsafe {
+        use std::ffi::CString;
+        let tags = ["wifi", "wifi_init", "phy_init", "phy", "esp_netif_lwip"];
+        for tag in &tags {
+            let c_tag = CString::new(*tag).unwrap();
+            esp_idf_svc::sys::esp_log_level_set(
+                c_tag.as_ptr(),
+                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_DEBUG,
+            );
+        }
+    }
     fap.push_status("status=connecting_wifi");
     fap.push_log(&format!(
         "WiFi: ssid='{}' pass_len={}",
@@ -117,16 +133,6 @@ fn main() -> Result<()> {
         settings.wifi_password.len()
     ));
     let mut wifi = wifi::create_wifi(peripherals.modem, sys_loop, nvs_partition, &settings)?;
-
-    // Scan once before first connection attempt — push results to FAP
-    {
-        // start() needed before scan, then stop() so start_and_connect can start cleanly
-        let _ = wifi.start();
-        let scan_result = wifi::scan_aps(&mut wifi);
-        fap.push_log(&scan_result);
-        let _ = wifi.stop();
-    }
-
     let mut wifi_attempt: u32 = 0;
     loop {
         wifi_attempt += 1;
