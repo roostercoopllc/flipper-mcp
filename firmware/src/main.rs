@@ -32,9 +32,6 @@ fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
     EspLogger::initialize_default();
 
-    // Give USB CDC time to enumerate so early logs aren't lost
-    thread::sleep(Duration::from_secs(2));
-
     info!("=== Flipper MCP Firmware v{} ===", env!("CARGO_PKG_VERSION"));
 
     // Step 2: Take hardware peripherals and system services
@@ -55,7 +52,29 @@ fn main() -> Result<()> {
         peripherals.pins.gpio44,
         settings_default.uart_baud_rate,
     )?;
+
+    // Step 4b: Wait for PING from FAP before sending any UART data.
+    // The Flipper's expansion module is active at boot and will crash (BusFault)
+    // if it receives our protocol messages. The FAP sends PING after it calls
+    // expansion_disable() and sets up its UART, so we block here until then.
+    info!("Waiting for PING from FAP (expansion_disable handshake)...");
+    loop {
+        match transport.read_line(1000) {
+            Some(line) if line.starts_with("PING") => {
+                info!("PING received — FAP is ready, starting protocol");
+                break;
+            }
+            Some(line) => {
+                info!("Pre-handshake UART: {} (ignoring)", line);
+            }
+            None => {}
+        }
+    }
+
     let fap = Arc::new(Mutex::new(FapProtocol::new(transport)));
+
+    // Reply to the PING so FAP knows we're alive
+    fap.lock().unwrap().push_pong();
 
     // Step 5: Load settings from NVS
     let mut settings = Settings::default();
