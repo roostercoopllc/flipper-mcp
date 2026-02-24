@@ -58,6 +58,9 @@
 
 #define DATA_DIR    EXT_PATH("apps_data/flipper_mcp")
 #define CONFIG_FILE EXT_PATH("apps_data/flipper_mcp/config.txt")
+#define LOG_FILE    EXT_PATH("apps_data/flipper_mcp/mcp.log")
+#define LOG_MAX_SIZE (64 * 1024)  /* 64 KB max log file size */
+#define LOG_TRIM_TO  (32 * 1024)  /* keep last 32 KB on trim */
 
 #define TEXT_BUF_LEN   1536  /* shared for status / log / tools display */
 #define RESULT_BUF_LEN 128
@@ -92,6 +95,7 @@ typedef enum {
     MenuTools,
     MenuRefresh,
     MenuLoadSdConfig,
+    MenuToggleSdLog,
 } MenuItem;
 
 typedef enum {
@@ -144,7 +148,11 @@ typedef struct {
     char  last_raw[128];              /* debug: last raw line received */
     FuriMutex* data_mutex;            /* protects status/log/tools/ack buffers */
     volatile bool esp_ready;          /* set true when PONG received from ESP32 */
+    volatile bool log_to_sd;          /* when true, LOG| lines also written to SD */
 } FlipperMcpApp;
+
+/* Forward declarations for functions used before their definition */
+static void sd_log_append(FlipperMcpApp* app, const char* msg);
 
 // -- UART helpers -------------------------------------------------------------
 
@@ -676,6 +684,10 @@ static void uart_parse_line(FlipperMcpApp* app, const char* line) {
             }
         }
         snprintf(app->log_buf + cur_len, TEXT_BUF_LEN - cur_len, "%s\n", msg);
+        /* Release mutex before SD I/O, then append to SD log file */
+        furi_mutex_release(app->data_mutex);
+        sd_log_append(app, msg);
+        return; /* mutex already released */
 
     } else if(strncmp(line, "TOOLS|", 6) == 0) {
         /* Comma-separated tool names -> one per line */
@@ -810,6 +822,69 @@ static uint16_t read_file_to_buf(
     }
     storage_file_free(f);
     return n;
+}
+
+// -- SD card log helpers ------------------------------------------------------
+
+/** Trim the log file to LOG_TRIM_TO bytes, keeping the tail (newest lines). */
+static void sd_log_trim(FlipperMcpApp* app) {
+    File* f = storage_file_alloc(app->storage);
+    if(!storage_file_open(f, LOG_FILE, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        storage_file_free(f);
+        return;
+    }
+    uint64_t size = storage_file_size(f);
+    if(size <= LOG_MAX_SIZE) {
+        storage_file_close(f);
+        storage_file_free(f);
+        return;
+    }
+    /* Seek past the portion we want to discard, read the rest */
+    uint32_t skip = (uint32_t)(size - LOG_TRIM_TO);
+    storage_file_seek(f, skip, true);
+    char* buf = malloc(LOG_TRIM_TO + 1);
+    if(!buf) {
+        storage_file_close(f);
+        storage_file_free(f);
+        return;
+    }
+    uint16_t n = storage_file_read(f, buf, LOG_TRIM_TO);
+    storage_file_close(f);
+    /* Find first newline so we start at a clean line boundary */
+    char* start = memchr(buf, '\n', n);
+    if(start) {
+        start++; /* skip past the newline */
+        uint32_t keep = n - (uint32_t)(start - buf);
+        if(storage_file_open(f, LOG_FILE, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+            storage_file_write(f, start, keep);
+            storage_file_close(f);
+        }
+    }
+    free(buf);
+    storage_file_free(f);
+}
+
+/** Append a single log line to the SD card log file (if SD logging enabled). */
+static void sd_log_append(FlipperMcpApp* app, const char* msg) {
+    if(!app->log_to_sd) return;
+    storage_simply_mkdir(app->storage, DATA_DIR);
+    File* f = storage_file_alloc(app->storage);
+    if(storage_file_open(f, LOG_FILE, FSAM_WRITE, FSOM_OPEN_APPEND)) {
+        uint64_t size = storage_file_size(f);
+        if(size > LOG_MAX_SIZE) {
+            storage_file_close(f);
+            sd_log_trim(app);
+            /* Reopen for append after trim */
+            if(!storage_file_open(f, LOG_FILE, FSAM_WRITE, FSOM_OPEN_APPEND)) {
+                storage_file_free(f);
+                return;
+            }
+        }
+        storage_file_write(f, msg, strlen(msg));
+        storage_file_write(f, "\n", 1);
+        storage_file_close(f);
+    }
+    storage_file_free(f);
 }
 
 // -- Actions ------------------------------------------------------------------
@@ -970,10 +1045,11 @@ static void action_save_config(FlipperMcpApp* app) {
     char file_content[320];
     snprintf(
         file_content, sizeof(file_content),
-        "wifi_ssid=%s\nwifi_password=%s\nrelay_url=%s\n",
+        "wifi_ssid=%s\nwifi_password=%s\nrelay_url=%s\nlog_to_sd=%d\n",
         app->ssid_buf,
         app->pass_buf,
-        app->relay_buf);
+        app->relay_buf,
+        app->log_to_sd ? 1 : 0);
     write_file_str(app, CONFIG_FILE, file_content);
 
     /* Wait briefly for ACK */
@@ -1040,6 +1116,8 @@ static void action_load_sd_config(FlipperMcpApp* app) {
             strncpy(device, p + 12, sizeof(device) - 1);
         else if(strncmp(p, "relay_url=", 10) == 0)
             strncpy(relay, p + 10, sizeof(relay) - 1);
+        else if(strncmp(p, "log_to_sd=", 10) == 0)
+            app->log_to_sd = (p[10] == '1');
 
         if(!nl_ptr) break;
         p = nl_ptr + 1;
@@ -1196,6 +1274,29 @@ static void text_input_done_cb(void* context) {
 
 // -- Menu callback ------------------------------------------------------------
 
+/* Forward declaration — menu_cb defined below, build_menu needs it. */
+static void menu_cb(void* context, uint32_t index);
+
+/** (Re-)build the main submenu. Called once at startup and again when
+ *  the SD log toggle changes so the label reflects current state. */
+static void build_menu(FlipperMcpApp* app) {
+    submenu_reset(app->menu);
+    submenu_set_header(app->menu, "Flipper MCP");
+    submenu_add_item(app->menu, "Status",          MenuStatus,    menu_cb, app);
+    submenu_add_item(app->menu, "Start Server",    MenuStart,     menu_cb, app);
+    submenu_add_item(app->menu, "Stop Server",     MenuStop,      menu_cb, app);
+    submenu_add_item(app->menu, "Restart Server",  MenuRestart,   menu_cb, app);
+    submenu_add_item(app->menu, "Reboot Board",    MenuReboot,    menu_cb, app);
+    submenu_add_item(app->menu, "Configure WiFi",  MenuConfigure, menu_cb, app);
+    submenu_add_item(app->menu, "View Logs",       MenuLogs,      menu_cb, app);
+    submenu_add_item(app->menu, "Tools List",      MenuTools,     menu_cb, app);
+    submenu_add_item(app->menu, "Refresh Modules", MenuRefresh,      menu_cb, app);
+    submenu_add_item(app->menu, "Load SD Config",  MenuLoadSdConfig, menu_cb, app);
+    submenu_add_item(app->menu,
+        app->log_to_sd ? "SD Log: ON" : "SD Log: OFF",
+        MenuToggleSdLog, menu_cb, app);
+}
+
 static void menu_cb(void* context, uint32_t index) {
     FlipperMcpApp* app = context;
 
@@ -1263,6 +1364,15 @@ static void menu_cb(void* context, uint32_t index) {
 
     case MenuLoadSdConfig:
         action_load_sd_config(app);
+        app->current_view = ViewIdResult;
+        view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
+        break;
+
+    case MenuToggleSdLog:
+        app->log_to_sd = !app->log_to_sd;
+        build_menu(app);  /* rebuild to update label */
+        snprintf(app->result, RESULT_BUF_LEN,
+            "SD logging %s", app->log_to_sd ? "enabled" : "disabled");
         app->current_view = ViewIdResult;
         view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
         break;
@@ -1377,17 +1487,7 @@ int32_t flipper_mcp_app(void* p) {
 
     /* Menu */
     app->menu = submenu_alloc();
-    submenu_set_header(app->menu, "Flipper MCP");
-    submenu_add_item(app->menu, "Status",          MenuStatus,    menu_cb, app);
-    submenu_add_item(app->menu, "Start Server",    MenuStart,     menu_cb, app);
-    submenu_add_item(app->menu, "Stop Server",     MenuStop,      menu_cb, app);
-    submenu_add_item(app->menu, "Restart Server",  MenuRestart,   menu_cb, app);
-    submenu_add_item(app->menu, "Reboot Board",    MenuReboot,    menu_cb, app);
-    submenu_add_item(app->menu, "Configure WiFi",  MenuConfigure, menu_cb, app);
-    submenu_add_item(app->menu, "View Logs",       MenuLogs,      menu_cb, app);
-    submenu_add_item(app->menu, "Tools List",      MenuTools,     menu_cb, app);
-    submenu_add_item(app->menu, "Refresh Modules", MenuRefresh,      menu_cb, app);
-    submenu_add_item(app->menu, "Load SD Config",  MenuLoadSdConfig, menu_cb, app);
+    build_menu(app);
     view_dispatcher_add_view(
         app->view_dispatcher, ViewIdMenu, submenu_get_view(app->menu));
 

@@ -52,6 +52,8 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
     info!("HTTP server starting on port 8080");
 
     // POST /mcp — Streamable HTTP JSON-RPC requests
+    // All responses are streamed directly to the HTTP writer — no intermediate
+    // Value tree or String allocation (prevents OOM on ESP32-S2).
     let server_post = server.clone();
     http.fn_handler::<anyhow::Error, _>("/mcp", Method::Post, move |mut request| {
         let mut buf = [0u8; 4096];
@@ -73,24 +75,17 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
 
         let body_str = std::str::from_utf8(&body).unwrap_or("");
 
-        match server_post.handle_request(body_str) {
-            Some(response) => {
-                // Stream serialization directly to the HTTP response — avoids
-                // allocating the full JSON string in memory (fixes OOM on tools/list
-                // with 30+ tools on ESP32-S2's 320KB heap).
-                let resp = request
-                    .into_response(200, Some("OK"), &[
-                        ("Content-Type", "application/json"),
-                        ("Access-Control-Allow-Origin", "*"),
-                    ])?;
-                let mut writer = StdIoWriter(resp);
-                serde_json::to_writer(&mut writer, &response)
-                    .map_err(|e| anyhow::anyhow!("JSON serialization: {e}"))?;
-            }
-            None => {
-                request.into_response(202, Some("Accepted"), &[
-                    ("Access-Control-Allow-Origin", "*"),
-                ])?;
+        // Stream the response directly to the HTTP writer
+        let resp = request.into_response(200, Some("OK"), &[
+            ("Content-Type", "application/json"),
+            ("Access-Control-Allow-Origin", "*"),
+        ])?;
+        let mut writer = StdIoWriter(resp);
+
+        match server_post.handle_request_streaming(body_str, &mut writer) {
+            Ok(_) => {} // true = response written, false = notification (empty 200 body is fine)
+            Err(e) => {
+                log::error!("Streaming error: {}", e);
             }
         }
 

@@ -108,16 +108,24 @@ pub fn register_sse_handlers(
 
         let body_str = std::str::from_utf8(&body).unwrap_or("");
 
-        // Process the JSON-RPC request and enqueue the response
-        if let Some(response) = mcp_server.handle_request(body_str) {
-            let response_json = serde_json::to_string(&response).unwrap_or_default();
-            if let Some(sid) = session_id {
-                let mut s = sessions_post.lock().unwrap();
-                if let Some(queue) = s.get_mut(&sid) {
-                    queue.push_back(response_json);
-                } else {
-                    log::warn!("POST /messages: unknown sessionId {}", sid);
+        // Stream JSON-RPC response to a Vec<u8> buffer (avoids double-allocation
+        // of Value tree → String — just one allocation for the final JSON bytes).
+        let mut buf = Vec::new();
+        match mcp_server.handle_request_streaming(body_str, &mut buf) {
+            Ok(true) => {
+                let response_json = String::from_utf8(buf).unwrap_or_default();
+                if let Some(sid) = session_id {
+                    let mut s = sessions_post.lock().unwrap();
+                    if let Some(queue) = s.get_mut(&sid) {
+                        queue.push_back(response_json);
+                    } else {
+                        log::warn!("POST /messages: unknown sessionId {}", sid);
+                    }
                 }
+            }
+            Ok(false) => {} // notification — no response to enqueue
+            Err(e) => {
+                log::error!("SSE streaming error: {}", e);
             }
         }
 

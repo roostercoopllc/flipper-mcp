@@ -107,13 +107,20 @@ fn run_session(
     loop {
         match rx.recv_timeout(HEARTBEAT_INTERVAL) {
             Ok(SessionEvent::Message(body)) => {
-                if let Some(response) = mcp_server.handle_request(&body) {
-                    client
-                        .send(
-                            esp_idf_svc::ws::FrameType::Text(false),
-                            response.as_bytes(),
-                        )
-                        .map_err(|e| anyhow::anyhow!("WS send failed: {}", e))?;
+                let mut buf = Vec::new();
+                match mcp_server.handle_request_streaming(&body, &mut buf) {
+                    Ok(true) => {
+                        client
+                            .send(
+                                esp_idf_svc::ws::FrameType::Text(false),
+                                &buf,
+                            )
+                            .map_err(|e| anyhow::anyhow!("WS send failed: {}", e))?;
+                    }
+                    Ok(false) => {} // notification — no response
+                    Err(e) => {
+                        error!("Tunnel streaming error: {}", e);
+                    }
                 }
             }
             Ok(SessionEvent::Disconnected) => {

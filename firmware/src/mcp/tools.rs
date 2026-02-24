@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::modules::ModuleRegistry;
 use crate::uart::FlipperProtocol;
@@ -16,10 +16,6 @@ impl ToolRegistry {
         Self {
             modules: ModuleRegistry::new(protocol),
         }
-    }
-
-    pub fn list_tools(&self) -> Value {
-        json!({ "tools": self.modules.list_all_tools() })
     }
 
     pub fn call_tool(&self, name: &str, args: &Value) -> ToolResult {
