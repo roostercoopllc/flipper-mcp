@@ -27,20 +27,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Push STATUS + LOG every N poll cycles (N × POLL_INTERVAL = 30 s).
 const STATUS_PUSH_EVERY: u32 = 6;
 
-/// Stub FlipperProtocol for Phase 1 — MCP tools that need Flipper CLI
-/// will get clear error messages until Phase 2 adds CLI relay via FAP.
-struct StubProtocol;
-
-impl FlipperProtocol for StubProtocol {
-    fn execute_command(&mut self, _command: &str) -> Result<String> {
-        anyhow::bail!("Flipper CLI not available — FAP bridge mode (Phase 2)")
-    }
-
-    fn write_file(&mut self, _path: &str, _content: &str) -> Result<()> {
-        anyhow::bail!("Flipper CLI not available — FAP bridge mode (Phase 2)")
-    }
-}
-
 fn main() -> Result<()> {
     // Step 1: ESP-IDF patches and logging
     esp_idf_svc::sys::link_patches();
@@ -69,7 +55,7 @@ fn main() -> Result<()> {
         peripherals.pins.gpio44,
         settings_default.uart_baud_rate,
     )?;
-    let fap = FapProtocol::new(transport);
+    let fap = Arc::new(Mutex::new(FapProtocol::new(transport)));
 
     // Step 5: Load settings from NVS
     let mut settings = Settings::default();
@@ -78,10 +64,10 @@ fn main() -> Result<()> {
     // Step 6: If no SSID configured, wait for CONFIG message from FAP
     if settings.wifi_ssid.is_empty() {
         info!("No WiFi SSID in NVS — waiting for CONFIG from FAP");
-        fap.push_status("status=needs_config");
+        fap.lock().unwrap().push_status("status=needs_config");
     }
     while settings.wifi_ssid.is_empty() {
-        for msg in fap.poll_messages() {
+        for msg in fap.lock().unwrap().poll_messages() {
             match msg {
                 FapMessage::Config(payload) => {
                     settings.merge_from_pipe_pairs(&payload);
@@ -90,26 +76,26 @@ fn main() -> Result<()> {
                         if let Err(e) = nvs_config.save_settings(&settings) {
                             error!("Failed to save config to NVS: {}", e);
                         }
-                        fap.push_ack("config", "ok");
+                        fap.lock().unwrap().push_ack("config", "ok");
                     }
                 }
                 FapMessage::Ping => {
-                    fap.push_status("status=needs_config");
+                    fap.lock().unwrap().push_status("status=needs_config");
                 }
                 FapMessage::Cmd(cmd) => {
                     if cmd == "reboot" {
-                        fap.push_ack("reboot", "ok");
+                        fap.lock().unwrap().push_ack("reboot", "ok");
                         thread::sleep(Duration::from_millis(100));
                         unsafe { esp_idf_svc::sys::esp_restart() }
                     }
-                    fap.push_ack(&cmd, "err:no_wifi");
+                    fap.lock().unwrap().push_ack(&cmd, "err:no_wifi");
                 }
             }
         }
         if settings.wifi_ssid.is_empty() {
             info!("Still waiting for WiFi config from FAP...");
             thread::sleep(Duration::from_secs(5));
-            fap.push_status("status=needs_config");
+            fap.lock().unwrap().push_status("status=needs_config");
         }
     }
 
@@ -126,8 +112,8 @@ fn main() -> Result<()> {
             );
         }
     }
-    fap.push_status("status=connecting_wifi");
-    fap.push_log(&format!(
+    fap.lock().unwrap().push_status("status=connecting_wifi");
+    fap.lock().unwrap().push_log(&format!(
         "WiFi: ssid='{}' pass_len={}",
         settings.wifi_ssid,
         settings.wifi_password.len()
@@ -136,7 +122,7 @@ fn main() -> Result<()> {
     let mut wifi_attempt: u32 = 0;
     loop {
         wifi_attempt += 1;
-        fap.push_log(&format!("WiFi attempt {}...", wifi_attempt));
+        fap.lock().unwrap().push_log(&format!("WiFi attempt {}...", wifi_attempt));
         match wifi::start_and_connect(&mut wifi) {
             Ok(()) => break,
             Err(e) => {
@@ -154,13 +140,16 @@ fn main() -> Result<()> {
                 } else {
                     err_short
                 };
-                fap.push_log(&format!("#{} FAIL: {}", wifi_attempt, err_display));
-                fap.push_status(&format!("status=wifi_error|error={}", err_display));
+                {
+                    let f = fap.lock().unwrap();
+                    f.push_log(&format!("#{} FAIL: {}", wifi_attempt, err_display));
+                    f.push_status(&format!("status=wifi_error|error={}", err_display));
+                }
 
                 // Poll for FAP messages while waiting to retry
                 for _ in 0..10 {
                     thread::sleep(Duration::from_secs(1));
-                    for msg in fap.poll_messages() {
+                    for msg in fap.lock().unwrap().poll_messages() {
                         match msg {
                             FapMessage::Config(payload) => {
                                 settings.merge_from_pipe_pairs(&payload);
@@ -168,26 +157,28 @@ fn main() -> Result<()> {
                                     warn!("NVS save: {}", e2);
                                 }
                                 wifi::reconfigure(&mut wifi, &settings)?;
-                                fap.push_ack("config", "ok");
+                                fap.lock().unwrap().push_ack("config", "ok");
                             }
                             FapMessage::Cmd(cmd) => {
                                 info!("FAP command during WiFi retry: {}", cmd);
+                                let f = fap.lock().unwrap();
                                 if cmd == "reboot" {
-                                    fap.push_ack("reboot", "ok");
+                                    f.push_ack("reboot", "ok");
+                                    drop(f);
                                     thread::sleep(Duration::from_millis(100));
                                     unsafe { esp_idf_svc::sys::esp_restart() }
                                 } else if cmd == "status" {
-                                    fap.push_status(&format!(
+                                    f.push_status(&format!(
                                         "status=wifi_error|error={}",
                                         err_short
                                     ));
-                                    fap.push_ack("status", "ok");
+                                    f.push_ack("status", "ok");
                                 } else {
-                                    fap.push_ack(&cmd, "err:wifi_not_connected");
+                                    f.push_ack(&cmd, "err:wifi_not_connected");
                                 }
                             }
                             FapMessage::Ping => {
-                                fap.push_pong();
+                                fap.lock().unwrap().push_pong();
                             }
                         }
                     }
@@ -208,11 +199,11 @@ fn main() -> Result<()> {
     // Step 9: Init log buffer
     let log_buf = Arc::new(LogBuffer::new());
 
-    // Step 10: Create MCP server with stub protocol, start HTTP.
-    // FapProtocol is used directly by the main loop for push/poll;
-    // MCP server gets a stub since CLI relay is Phase 2.
-    let stub: Arc<Mutex<dyn FlipperProtocol>> = Arc::new(Mutex::new(StubProtocol));
-    let mcp_server = Arc::new(mcp::McpServer::new(stub, log_buf.clone()));
+    // Step 10: Create MCP server with shared FapProtocol, start HTTP.
+    // The MCP server uses FapProtocol for CLI relay (execute_command sends
+    // CLI| over UART, FAP executes via native SDK, returns CLI_OK/CLI_ERR).
+    let protocol: Arc<Mutex<dyn FlipperProtocol>> = fap.clone();
+    let mcp_server = Arc::new(mcp::McpServer::new(protocol, log_buf.clone()));
 
     let mut manager = HttpServerManager::new(mcp_server.clone());
     manager.start()?;
@@ -236,9 +227,12 @@ fn main() -> Result<()> {
     ));
     log_buf.push("MCP server listening on :8080");
     push_full_status(&fap, &device_ip, &settings, &manager, false);
-    fap.push_tools(&mcp_server.list_tool_names());
-    for line in log_buf.snapshot() {
-        fap.push_log(&line);
+    {
+        let f = fap.lock().unwrap();
+        f.push_tools(&mcp_server.list_tool_names());
+        for line in log_buf.snapshot() {
+            f.push_log(&line);
+        }
     }
 
     // Step 14: Main loop — poll UART for FAP messages
@@ -248,7 +242,7 @@ fn main() -> Result<()> {
         thread::sleep(POLL_INTERVAL);
         poll_count = poll_count.wrapping_add(1);
 
-        let messages = fap.poll_messages();
+        let messages = fap.lock().unwrap().poll_messages();
 
         for msg in &messages {
             match msg {
@@ -260,14 +254,11 @@ fn main() -> Result<()> {
                         handle_command(cmd, &mut manager, &mcp_server, &log_buf, &fap);
 
                     if cmd == "reboot" {
-                        // handle_command already sent ACK and flushed logs;
-                        // small delay ensures UART TX buffer is fully transmitted
-                        // before the chip resets.
                         thread::sleep(Duration::from_millis(100));
                         unsafe { esp_idf_svc::sys::esp_restart() }
                     }
 
-                    fap.push_ack(cmd, &ack_result);
+                    fap.lock().unwrap().push_ack(cmd, &ack_result);
                 }
                 FapMessage::Config(payload) => {
                     info!("FAP config update");
@@ -280,10 +271,10 @@ fn main() -> Result<()> {
                         }
                     };
                     log_buf.push(&format!("Config updated: {}", save_result));
-                    fap.push_ack("config", &save_result);
+                    fap.lock().unwrap().push_ack("config", &save_result);
                 }
                 FapMessage::Ping => {
-                    fap.push_pong();
+                    fap.lock().unwrap().push_pong();
                 }
             }
         }
@@ -299,9 +290,11 @@ fn main() -> Result<()> {
                 &manager,
                 relay_connected.load(Ordering::Relaxed),
             );
+            let f = fap.lock().unwrap();
             for line in log_buf.snapshot() {
-                fap.push_log(&line);
+                f.push_log(&line);
             }
+            drop(f);
             poll_count = 0;
         }
     }
@@ -313,7 +306,7 @@ fn handle_command(
     manager: &mut HttpServerManager,
     mcp_server: &Arc<mcp::McpServer>,
     log_buf: &Arc<LogBuffer>,
-    fap: &FapProtocol,
+    fap: &Arc<Mutex<FapProtocol>>,
 ) -> String {
     match cmd {
         "stop" => {
@@ -339,9 +332,10 @@ fn handle_command(
         "reboot" => {
             info!("Reboot command received — restarting device");
             log_buf.push("Rebooting (FAP command)");
-            fap.push_ack("reboot", "ok");
+            let f = fap.lock().unwrap();
+            f.push_ack("reboot", "ok");
             for line in log_buf.snapshot() {
-                fap.push_log(&line);
+                f.push_log(&line);
             }
             // Caller will call esp_restart() after this returns
             "ok".to_string()
@@ -349,7 +343,7 @@ fn handle_command(
         "refresh_modules" => {
             let names = mcp_server.refresh_and_list_tools();
             log_buf.push(&format!("Modules refreshed: {} tools", names.len()));
-            fap.push_tools(&names);
+            fap.lock().unwrap().push_tools(&names);
             "ok".to_string()
         }
         "status" => "ok".to_string(),
@@ -362,7 +356,7 @@ fn handle_command(
 
 /// Push a full STATUS message with all fields.
 fn push_full_status(
-    fap: &FapProtocol,
+    fap: &Arc<Mutex<FapProtocol>>,
     ip: &str,
     settings: &Settings,
     manager: &HttpServerManager,
@@ -383,7 +377,7 @@ fn push_full_status(
     // SAFETY: esp_get_free_heap_size is a trivial C wrapper with no preconditions
     let heap_kb = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024;
 
-    fap.push_status(&format!(
+    fap.lock().unwrap().push_status(&format!(
         "ip={}|ssid={}|server={}|device={}|ver={}|relay={}|heap_free={}KB",
         ip,
         settings.wifi_ssid,

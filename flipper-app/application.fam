@@ -3,7 +3,7 @@ App(
     name="Flipper MCP",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="flipper_mcp_app",
-    requires=["gui", "storage", "notification", "expansion"],
+    requires=["gui", "storage", "notification", "expansion", "bt"],
     sources=["flipper_mcp.c"],
     fap_category="Tools",
     fap_version=(2, 0),

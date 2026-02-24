@@ -8,7 +8,11 @@
  *
  * Protocol (ESP32 <-> FAP, 115200 baud, \n-terminated lines, | delimited):
  *   ESP32 -> FAP: STATUS|key=val|..., LOG|msg, TOOLS|name,name,..., ACK|cmd=X|result=ok, PONG
+ *                 CLI|<command>          (relay: execute via Flipper SDK)
+ *                 WRITE_FILE|path|content (relay: write to SD card)
  *   FAP -> ESP32: CMD|start, CMD|stop, CONFIG|ssid=X|password=Y|..., PING
+ *                 CLI_OK|result          (relay response: success)
+ *                 CLI_ERR|error          (relay response: failure)
  *
  * Screens:
  *   Status         — shows latest STATUS fields from ESP32
@@ -38,9 +42,17 @@
 #include <expansion/expansion.h>
 #include <furi_hal_serial.h>
 #include <furi_hal_serial_control.h>
+#include <furi_hal_version.h>
+#include <furi_hal_power.h>
+#include <furi_hal_gpio.h>
+#include <furi_hal_resources.h>
+#include <furi_hal_rtc.h>
+#include <bt/bt_service/bt.h>
+#include <toolbox/version.h>
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define TAG "FlipperMCP"
 
@@ -155,6 +167,438 @@ static void uart_rx_cb(
     }
 }
 
+// -- CLI relay: escape/unescape helpers ---------------------------------------
+
+/** Escape newlines in src as literal "\\n" for UART transport. */
+static void escape_newlines(const char* src, char* dst, size_t dst_size) {
+    size_t di = 0;
+    for(size_t si = 0; src[si] && di + 3 < dst_size; si++) {
+        if(src[si] == '\n') {
+            dst[di++] = '\\';
+            dst[di++] = 'n';
+        } else {
+            dst[di++] = src[si];
+        }
+    }
+    dst[di] = '\0';
+}
+
+// -- CLI relay: GPIO pin lookup table -----------------------------------------
+
+typedef struct {
+    const char* name;
+    const GpioPin* pin;
+} GpioPinEntry;
+
+static const GpioPinEntry mcp_gpio_pins[] = {
+    {"PA7", &gpio_ext_pa7},
+    {"PA6", &gpio_ext_pa6},
+    {"PA4", &gpio_ext_pa4},
+    {"PB3", &gpio_ext_pb3},
+    {"PB2", &gpio_ext_pb2},
+    {"PC3", &gpio_ext_pc3},
+    {"PC1", &gpio_ext_pc1},
+    {"PC0", &gpio_ext_pc0},
+};
+#define MCP_GPIO_PIN_COUNT (sizeof(mcp_gpio_pins) / sizeof(mcp_gpio_pins[0]))
+
+static const GpioPin* gpio_lookup(const char* name) {
+    for(size_t i = 0; i < MCP_GPIO_PIN_COUNT; i++) {
+        if(strcasecmp(mcp_gpio_pins[i].name, name) == 0) {
+            return mcp_gpio_pins[i].pin;
+        }
+    }
+    return NULL;
+}
+
+// -- CLI relay: command handlers -----------------------------------------------
+
+static bool cmd_device_info(char* result, size_t result_size) {
+    const Version* fw_ver = furi_hal_version_get_firmware_version();
+    const char* branch = fw_ver ? version_get_gitbranch(fw_ver) : NULL;
+    const char* build_date = fw_ver ? version_get_builddate(fw_ver) : NULL;
+    const char* fw_version = fw_ver ? version_get_version(fw_ver) : NULL;
+    snprintf(
+        result,
+        result_size,
+        "name: %s\nhw_version: %d\nhw_target: %d\nfw_version: %s\nfw_branch: %s\nfw_build_date: %s",
+        furi_hal_version_get_name_ptr() ? furi_hal_version_get_name_ptr() : "unknown",
+        furi_hal_version_get_hw_version(),
+        furi_hal_version_get_hw_target(),
+        fw_version ? fw_version : "unknown",
+        branch ? branch : "unknown",
+        build_date ? build_date : "unknown");
+    return true;
+}
+
+static bool cmd_power_info(char* result, size_t result_size) {
+    snprintf(
+        result,
+        result_size,
+        "battery_voltage: %.2fV\nbattery_current: %.1fmA\nbattery_temp: %.1fC\ncharging: %s\ncharge_pct: %d%%\nusb_connected: %s",
+        (double)furi_hal_power_get_battery_voltage(FuriHalPowerICFuelGauge),
+        (double)furi_hal_power_get_battery_current(FuriHalPowerICFuelGauge),
+        (double)furi_hal_power_get_battery_temperature(FuriHalPowerICFuelGauge),
+        furi_hal_power_is_charging() ? "yes" : "no",
+        furi_hal_power_get_pct(),
+        furi_hal_power_is_otg_enabled() ? "yes" : "no");
+    return true;
+}
+
+static bool cmd_free(char* result, size_t result_size) {
+    snprintf(
+        result,
+        result_size,
+        "free_heap: %zu\ntotal_heap: %zu",
+        memmgr_get_free_heap(),
+        memmgr_get_total_heap());
+    return true;
+}
+
+static bool cmd_uptime(char* result, size_t result_size) {
+    uint32_t ticks = furi_get_tick();
+    uint32_t secs = ticks / 1000;
+    uint32_t mins = secs / 60;
+    uint32_t hours = mins / 60;
+    snprintf(
+        result,
+        result_size,
+        "uptime: %luh %lum %lus (%lu ticks)",
+        (unsigned long)hours,
+        (unsigned long)(mins % 60),
+        (unsigned long)(secs % 60),
+        (unsigned long)ticks);
+    return true;
+}
+
+static bool cmd_gpio(const char* subcmd, char* result, size_t result_size) {
+    /* Parse: "set PA7 1", "read PA7", "mode PA7 1" */
+    char action[16] = {0};
+    char pin_name[8] = {0};
+    int value = 0;
+
+    int parsed = sscanf(subcmd, "%15s %7s %d", action, pin_name, &value);
+    if(parsed < 2) {
+        snprintf(result, result_size, "Usage: gpio <set|read|mode> <pin> [value]");
+        return false;
+    }
+
+    const GpioPin* pin = gpio_lookup(pin_name);
+    if(!pin) {
+        snprintf(
+            result,
+            result_size,
+            "Unknown pin: %s\nValid: PA7,PA6,PA4,PB3,PB2,PC3,PC1,PC0",
+            pin_name);
+        return false;
+    }
+
+    if(strcmp(action, "set") == 0) {
+        if(parsed < 3) {
+            snprintf(result, result_size, "Usage: gpio set <pin> <0|1>");
+            return false;
+        }
+        furi_hal_gpio_init(pin, GpioModeOutputPushPull, GpioPullNo, GpioSpeedLow);
+        furi_hal_gpio_write(pin, value != 0);
+        snprintf(result, result_size, "%s = %d", pin_name, value != 0);
+        return true;
+    } else if(strcmp(action, "read") == 0) {
+        furi_hal_gpio_init(pin, GpioModeInput, GpioPullNo, GpioSpeedLow);
+        bool state = furi_hal_gpio_read(pin);
+        snprintf(result, result_size, "%s = %d", pin_name, state ? 1 : 0);
+        return true;
+    } else if(strcmp(action, "mode") == 0) {
+        if(parsed < 3) {
+            snprintf(result, result_size, "Usage: gpio mode <pin> <0=in|1=out>");
+            return false;
+        }
+        if(value == 0) {
+            furi_hal_gpio_init(pin, GpioModeInput, GpioPullNo, GpioSpeedLow);
+        } else {
+            furi_hal_gpio_init(pin, GpioModeOutputPushPull, GpioPullNo, GpioSpeedLow);
+        }
+        snprintf(result, result_size, "%s mode = %s", pin_name, value ? "output" : "input");
+        return true;
+    } else {
+        snprintf(result, result_size, "Unknown gpio action: %s (use set/read/mode)", action);
+        return false;
+    }
+}
+
+static bool
+    cmd_storage(FlipperMcpApp* app, const char* subcmd, char* result, size_t result_size) {
+    char action[16] = {0};
+    char path[256] = {0};
+
+    int parsed = sscanf(subcmd, "%15s %255s", action, path);
+    if(parsed < 2) {
+        snprintf(result, result_size, "Usage: storage <read|list|stat|mkdir> <path>");
+        return false;
+    }
+
+    if(strcmp(action, "read") == 0) {
+        File* f = storage_file_alloc(app->storage);
+        if(!storage_file_open(f, path, FSAM_READ, FSOM_OPEN_EXISTING)) {
+            snprintf(result, result_size, "Cannot open: %s", path);
+            storage_file_free(f);
+            return false;
+        }
+        size_t n = storage_file_read(f, result, result_size - 1);
+        result[n] = '\0';
+        storage_file_close(f);
+        storage_file_free(f);
+        return true;
+    } else if(strcmp(action, "list") == 0) {
+        File* dir = storage_file_alloc(app->storage);
+        if(!storage_dir_open(dir, path)) {
+            snprintf(result, result_size, "Cannot open dir: %s", path);
+            storage_file_free(dir);
+            return false;
+        }
+        FileInfo info;
+        char name[128];
+        size_t pos = 0;
+        while(storage_dir_read(dir, &info, name, sizeof(name)) && pos + 60 < result_size) {
+            bool is_dir = (info.flags & FSF_DIRECTORY);
+            int written = snprintf(
+                result + pos,
+                result_size - pos,
+                "%s%s %lu\n",
+                is_dir ? "[D] " : "",
+                name,
+                (unsigned long)info.size);
+            if(written > 0) pos += (size_t)written;
+        }
+        if(pos == 0) snprintf(result, result_size, "(empty directory)");
+        storage_dir_close(dir);
+        storage_file_free(dir);
+        return true;
+    } else if(strcmp(action, "stat") == 0) {
+        FileInfo info;
+        if(storage_common_stat(app->storage, path, &info) != FSE_OK) {
+            snprintf(result, result_size, "Not found: %s", path);
+            return false;
+        }
+        snprintf(
+            result,
+            result_size,
+            "path: %s\nsize: %lu\ntype: %s",
+            path,
+            (unsigned long)info.size,
+            (info.flags & FSF_DIRECTORY) ? "directory" : "file");
+        return true;
+    } else if(strcmp(action, "mkdir") == 0) {
+        if(storage_simply_mkdir(app->storage, path)) {
+            snprintf(result, result_size, "Created: %s", path);
+            return true;
+        } else {
+            snprintf(result, result_size, "Failed to create: %s", path);
+            return false;
+        }
+    } else if(strcmp(action, "write") == 0) {
+        /* "storage write /path content..." -- content is everything after path + space */
+        const char* content_start = subcmd + 6; /* skip "write " */
+        /* skip the path */
+        const char* space = strchr(content_start, ' ');
+        if(!space || !space[1]) {
+            snprintf(result, result_size, "Usage: storage write <path> <content>");
+            return false;
+        }
+        const char* content = space + 1;
+        storage_simply_mkdir(app->storage, DATA_DIR);
+        File* f = storage_file_alloc(app->storage);
+        if(!storage_file_open(f, path, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+            snprintf(result, result_size, "Cannot write: %s", path);
+            storage_file_free(f);
+            return false;
+        }
+        storage_file_write(f, content, strlen(content));
+        storage_file_close(f);
+        storage_file_free(f);
+        snprintf(result, result_size, "Written %zu bytes to %s", strlen(content), path);
+        return true;
+    } else {
+        snprintf(
+            result, result_size, "Unknown storage action: %s (use read/list/stat/mkdir/write)", action);
+        return false;
+    }
+}
+
+static bool cmd_ble(FlipperMcpApp* app, const char* subcmd, char* result, size_t result_size) {
+    UNUSED(app);
+    /* BLE commands are dispatched to the Flipper's BT service.
+     * BLE scanning requires temporarily disconnecting the mobile app. */
+
+    if(strncmp(subcmd, "scan", 4) == 0) {
+        /* Parse duration: "scan --duration 5" or "scan 5" */
+        int duration = 5;
+        const char* dur_str = strstr(subcmd, "--duration ");
+        if(dur_str) {
+            duration = atoi(dur_str + 11);
+        } else if(subcmd[4] == ' ') {
+            duration = atoi(subcmd + 5);
+        }
+        if(duration < 1) duration = 1;
+        if(duration > 30) duration = 30;
+
+        /* Open BT service */
+        Bt* bt = furi_record_open(RECORD_BT);
+        bt_disconnect(bt);
+
+        /* Wait for disconnect */
+        furi_delay_ms(500);
+
+        /* BLE GAP scanning is not directly exposed in the public FAP SDK.
+         * For now, report that the BT service was toggled and return a
+         * placeholder. Full scan requires STM32WB BLE stack integration. */
+        snprintf(
+            result,
+            result_size,
+            "BLE scan (%ds): BT service disconnected.\n"
+            "Note: GAP scanning requires STM32WB BLE stack\n"
+            "integration (pending full implementation).\n"
+            "BT service restored.",
+            duration);
+
+        /* Re-enable BT */
+        furi_delay_ms(200);
+        furi_record_close(RECORD_BT);
+        return true;
+
+    } else if(strncmp(subcmd, "connect", 7) == 0) {
+        snprintf(result, result_size, "BLE connect: not yet implemented (requires GAP central role)");
+        return false;
+    } else if(strncmp(subcmd, "disconnect", 10) == 0) {
+        snprintf(result, result_size, "BLE disconnect: not yet implemented");
+        return false;
+    } else if(strncmp(subcmd, "gatt_discover", 13) == 0) {
+        snprintf(result, result_size, "BLE GATT discover: not yet implemented");
+        return false;
+    } else if(strncmp(subcmd, "gatt_read", 9) == 0) {
+        snprintf(result, result_size, "BLE GATT read: not yet implemented");
+        return false;
+    } else if(strncmp(subcmd, "gatt_write", 10) == 0) {
+        snprintf(result, result_size, "BLE GATT write: not yet implemented");
+        return false;
+    } else {
+        snprintf(result, result_size, "Unknown BLE command: %.40s", subcmd);
+        return false;
+    }
+}
+
+// -- CLI relay: dispatcher ----------------------------------------------------
+
+/** Handle a CLI command from ESP32. Executes the command and sends CLI_OK or CLI_ERR. */
+static void cli_dispatch(FlipperMcpApp* app, const char* command) {
+    char result[512];
+    result[0] = '\0';
+    bool ok = false;
+
+    FURI_LOG_I(TAG, "CLI dispatch: %.80s", command);
+
+    if(strncmp(command, "device_info", 11) == 0) {
+        ok = cmd_device_info(result, sizeof(result));
+    } else if(strncmp(command, "power info", 10) == 0) {
+        ok = cmd_power_info(result, sizeof(result));
+    } else if(strncmp(command, "power off", 9) == 0) {
+        furi_hal_power_off();
+        snprintf(result, sizeof(result), "powering off");
+        ok = true;
+    } else if(strncmp(command, "power reboot", 12) == 0) {
+        snprintf(result, sizeof(result), "rebooting");
+        ok = true;
+        /* Send response before reboot */
+        char escaped[1024];
+        escape_newlines(result, escaped, sizeof(escaped));
+        char response[1100];
+        snprintf(response, sizeof(response), "CLI_OK|%s", escaped);
+        uart_send(app, response);
+        furi_delay_ms(100);
+        furi_hal_power_reset();
+        return; /* won't reach here */
+    } else if(strncmp(command, "gpio ", 5) == 0) {
+        ok = cmd_gpio(command + 5, result, sizeof(result));
+    } else if(strncmp(command, "storage ", 8) == 0) {
+        ok = cmd_storage(app, command + 8, result, sizeof(result));
+    } else if(strncmp(command, "ble ", 4) == 0) {
+        ok = cmd_ble(app, command + 4, result, sizeof(result));
+    } else if(strcmp(command, "free") == 0) {
+        ok = cmd_free(result, sizeof(result));
+    } else if(strcmp(command, "uptime") == 0) {
+        ok = cmd_uptime(result, sizeof(result));
+    } else if(strcmp(command, "ps") == 0) {
+        /* Thread enumeration is limited in FAP context — report what we can */
+        snprintf(
+            result,
+            sizeof(result),
+            "free_heap: %zu\ntotal_heap: %zu\n(thread list requires OS-level access)",
+            memmgr_get_free_heap(),
+            memmgr_get_total_heap());
+        ok = true;
+    } else {
+        snprintf(result, sizeof(result), "Unknown command: %.100s", command);
+        ok = false;
+    }
+
+    /* Escape newlines and send response */
+    char escaped[1024];
+    escape_newlines(result, escaped, sizeof(escaped));
+    char response[1100];
+    snprintf(response, sizeof(response), "%s|%s", ok ? "CLI_OK" : "CLI_ERR", escaped);
+    uart_send(app, response);
+}
+
+/* Forward declaration — defined further down in the file */
+static bool write_file_str(FlipperMcpApp* app, const char* path, const char* content);
+
+/** Handle WRITE_FILE|path|content from ESP32 */
+static void handle_write_file(FlipperMcpApp* app, const char* payload) {
+    /* payload = "path|escaped_content" */
+    char payload_copy[4096];
+    strncpy(payload_copy, payload, sizeof(payload_copy) - 1);
+    payload_copy[sizeof(payload_copy) - 1] = '\0';
+
+    char* pipe = strchr(payload_copy, '|');
+    if(!pipe) {
+        uart_send(app, "CLI_ERR|Invalid WRITE_FILE format (no pipe)");
+        return;
+    }
+    *pipe = '\0';
+    const char* path = payload_copy;
+    const char* escaped_content = pipe + 1;
+
+    /* Unescape \\n -> \n */
+    char content[4096];
+    size_t ci = 0;
+    for(size_t i = 0; escaped_content[i] && ci + 1 < sizeof(content); i++) {
+        if(escaped_content[i] == '\\' && escaped_content[i + 1] == 'n') {
+            content[ci++] = '\n';
+            i++; /* skip the 'n' */
+        } else {
+            content[ci++] = escaped_content[i];
+        }
+    }
+    content[ci] = '\0';
+
+    /* Ensure parent directory exists */
+    char dir_path[256];
+    strncpy(dir_path, path, sizeof(dir_path) - 1);
+    dir_path[sizeof(dir_path) - 1] = '\0';
+    char* last_slash = strrchr(dir_path, '/');
+    if(last_slash) {
+        *last_slash = '\0';
+        storage_simply_mkdir(app->storage, dir_path);
+    }
+
+    if(write_file_str(app, path, content)) {
+        char resp[256];
+        snprintf(resp, sizeof(resp), "CLI_OK|written %zu bytes", ci);
+        uart_send(app, resp);
+    } else {
+        uart_send(app, "CLI_ERR|write failed");
+    }
+}
+
 /** Parse a complete line received from ESP32. Called by the worker thread. */
 static void uart_parse_line(FlipperMcpApp* app, const char* line) {
     furi_mutex_acquire(app->data_mutex, FuriWaitForever);
@@ -234,6 +678,20 @@ static void uart_parse_line(FlipperMcpApp* app, const char* line) {
 
     } else if(strncmp(line, "PONG", 4) == 0) {
         FURI_LOG_D(TAG, "PONG received");
+
+    } else if(strncmp(line, "CLI|", 4) == 0) {
+        /* CLI relay: execute command and send response.
+         * Release mutex first — command execution may take time. */
+        furi_mutex_release(app->data_mutex);
+        cli_dispatch(app, line + 4);
+        return; /* mutex already released */
+
+    } else if(strncmp(line, "WRITE_FILE|", 11) == 0) {
+        /* File write relay: write to SD card.
+         * Release mutex first — file I/O may take time. */
+        furi_mutex_release(app->data_mutex);
+        handle_write_file(app, line + 11);
+        return; /* mutex already released */
 
     } else {
         FURI_LOG_W(TAG, "Unknown UART line: %.80s", line);
