@@ -671,11 +671,49 @@ The steps are skipped when the corresponding bucket secret is empty. Check:
 
 ---
 
+## BLE Issues
+
+### `ble_scan` returns placeholder instead of actual devices
+
+```
+BLE scan (5s): BT service disconnected.
+Note: GAP scanning requires STM32WB BLE stack integration (pending full implementation).
+BT service restored.
+```
+
+The `ble_scan` tool currently toggles the BT service but does not perform actual GAP scanning. Full BLE scanning requires direct integration with the STM32WB BLE stack (HCI layer), which is not exposed in the public Flipper FAP SDK. The tool successfully disconnects and reconnects the BT service — actual device enumeration is pending implementation.
+
+### `ble_connect` / `ble_gatt_*` return "not yet implemented"
+
+BLE central role (connecting to peripherals, GATT client operations) requires the STM32WB BLE stack to operate in GAP Central mode. The Flipper's default BLE configuration is GAP Peripheral (for the mobile app connection). Switching roles requires low-level BLE stack reconfiguration that is not yet implemented.
+
+### BLE scan disconnects the Flipper mobile app
+
+This is expected behavior. The Flipper Zero shares a single BLE radio between the mobile app connection and scanning. When `ble_scan` runs, it must temporarily stop BLE advertising and disconnect any active mobile app session. The connection is restored after the scan completes (typically within the scan duration + ~1 second).
+
+### BLE tool times out (35 second timeout)
+
+BLE operations use a 35-second UART relay timeout (longer than the default 10 seconds) to accommodate scan durations up to 30 seconds. If the tool still times out:
+- Check that the FAP is running and the UART connection is active
+- Reduce the scan duration (default is 5 seconds, max 30)
+- Check the serial monitor for ESP32-side errors
+
+---
+
 ## Memory / Stack Issues
 
 ### Panic: `stack overflow`
 The ESP32-S2 has limited stack space per thread. If a handler panics with a stack overflow:
 - The HTTP server handler stack is set to 10240 bytes — increase in `streamable.rs` `Configuration::stack_size`
 - The tunnel thread uses 10240 bytes — increase `TUNNEL_STACK_SIZE` in `tunnel/client.rs`
+- The FAP worker thread uses 8192 bytes — increase in `flipper_mcp.c` `furi_thread_alloc_ex`
 
 The main task uses 20000 bytes (set in `sdkconfig.defaults` as `CONFIG_ESP_MAIN_TASK_STACK_SIZE`).
+
+### OOM on `tools/list` with many tools
+
+If `tools/list` causes an out-of-memory crash on the ESP32-S2, the response serialization is consuming too much heap. All JSON-RPC responses are now streamed directly to the HTTP writer (no intermediate `Value` tree), but if you add very large tool schemas, heap may still be tight. Check free heap in the FAP Status screen (`heap_free` field).
+
+### FAP Fatal Error / BusFault during CLI relay
+
+If the Flipper crashes with a Fatal Error when MCP tools execute, the FAP worker thread may be overflowing its stack with large local buffers. The CLI dispatch and file write handlers use heap allocation (`malloc`/`free`) for large buffers. If you add new CLI handlers, keep stack-allocated buffers under 512 bytes and use `malloc` for anything larger.

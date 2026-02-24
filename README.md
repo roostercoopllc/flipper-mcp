@@ -176,11 +176,12 @@ See [RELAY.md](docs/RELAY.md#cloud-deployment-opentofu) for full instructions.
 | GPIO | `gpio_read`, `gpio_write`, `gpio_set_mode` | Pin I/O control |
 | BadUSB | `badusb_run`, `badusb_list` | USB HID attacks |
 | iButton | `ibutton_read`, `ibutton_emulate` | 1-Wire key fobs |
-| Storage | `storage_list`, `storage_read`, `storage_write`, `storage_remove` | SD card file management |
-| System | `system_info`, `system_reboot`, `system_power`, `system_ps`, `system_free` | Device management |
-| Apps | `app_list`, `app_launch`, `app_close`, `app_info` | Application management |
+| Storage | `storage_list`, `storage_read`, `storage_write`, `storage_remove`, `storage_stat` | SD card file management |
+| System | `system_device_info`, `system_power_info`, `system_power_reboot`, `system_ps`, `system_free`, `system_uptime` | Device management |
+| BLE | `ble_scan`, `ble_connect`, `ble_disconnect`, `ble_gatt_discover`, `ble_gatt_read`, `ble_gatt_write` | Bluetooth Low Energy |
+| Apps | `app_launch_{name}` (auto-discovered from SD card) | Application management |
 
-Custom tools can be added via TOML config files or by installing FAP apps on the SD card.
+Custom tools can be added via TOML config files or by installing FAP apps on the SD card. See [OPERATIONS.md](docs/OPERATIONS.md) for copy-paste curl commands for every tool.
 
 ## Free Alternative: Open WebUI + Ollama
 
@@ -267,6 +268,7 @@ flipper-mcp/
 - [SETUP.md](docs/SETUP.md) — Full setup from scratch
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — System design deep dive
 - [API.md](docs/API.md) — Complete MCP tool reference
+- [OPERATIONS.md](docs/OPERATIONS.md) — Operations guide with curl commands for every tool
 - [MODULE_DEVELOPMENT.md](docs/MODULE_DEVELOPMENT.md) — Create custom modules
 - [RELAY.md](docs/RELAY.md) — Remote access setup
 - [HARDWARE.md](docs/HARDWARE.md) — Wiring and hardware details
