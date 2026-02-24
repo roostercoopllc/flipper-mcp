@@ -12,39 +12,39 @@ impl FlipperModule for RfidModule {
     }
 
     fn description(&self) -> &str {
-        "125kHz RFID tag read, emulate, and write"
+        "125kHz RFID tag read, save, and emulate (EM4100, HID Prox, Indala, etc.)"
     }
 
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
                 name: "rfid_read".to_string(),
-                description: "Read a 125kHz RFID tag held near the Flipper".to_string(),
+                description: "Read a 125kHz RFID tag held near the Flipper. Auto-detects protocol (EM4100, HID Prox, Indala, etc.). Times out after 10 seconds."
+                    .to_string(),
                 input_schema: json!({ "type": "object", "properties": {}, "required": [] }),
             },
             ToolDefinition {
-                name: "rfid_emulate".to_string(),
-                description: "Emulate a 125kHz RFID tag with the specified type and data"
+                name: "rfid_read_and_save".to_string(),
+                description: "Read a 125kHz RFID tag and save it to a file on the Flipper SD card. The saved file can later be used with rfid_emulate."
                     .to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "type": { "type": "string", "description": "Tag type (e.g. 'EM4100', 'HIDProx', 'Indala')" },
-                        "data": { "type": "string", "description": "Tag data (hex string)" }
+                        "path": { "type": "string", "description": "Save path on Flipper SD card (e.g. '/ext/lfrfid/my_tag.rfid')" }
                     },
-                    "required": ["type", "data"]
+                    "required": ["path"]
                 }),
             },
             ToolDefinition {
-                name: "rfid_write".to_string(),
-                description: "Write data to a 125kHz RFID tag".to_string(),
+                name: "rfid_emulate".to_string(),
+                description: "Emulate a 125kHz RFID tag from a saved file. The Flipper's coil will broadcast this tag for 10 seconds."
+                    .to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "type": { "type": "string", "description": "Tag type (e.g. 'EM4100', 'T5577')" },
-                        "data": { "type": "string", "description": "Data to write (hex string)" }
+                        "path": { "type": "string", "description": "Path to .rfid file on Flipper SD card (e.g. '/ext/lfrfid/my_tag.rfid')" }
                     },
-                    "required": ["type", "data"]
+                    "required": ["path"]
                 }),
             },
         ]
@@ -58,26 +58,23 @@ impl FlipperModule for RfidModule {
     ) -> ToolResult {
         let command = match tool {
             "rfid_read" => "rfid read".to_string(),
-            "rfid_emulate" => {
-                let tag_type = args.get("type").and_then(|v| v.as_str());
-                let data = args.get("data").and_then(|v| v.as_str());
-                match (tag_type, data) {
-                    (Some(t), Some(d)) => format!("rfid emulate {} {}", t, d),
-                    _ => return ToolResult::error("Missing required parameters: type, data"),
-                }
-            }
-            "rfid_write" => {
-                let tag_type = args.get("type").and_then(|v| v.as_str());
-                let data = args.get("data").and_then(|v| v.as_str());
-                match (tag_type, data) {
-                    (Some(t), Some(d)) => format!("rfid write {} {}", t, d),
-                    _ => return ToolResult::error("Missing required parameters: type, data"),
-                }
-            }
+            "rfid_read_and_save" => match args.get("path").and_then(|v| v.as_str()) {
+                Some(path) => format!("rfid read_and_save {}", path),
+                None => return ToolResult::error("Missing required parameter: path"),
+            },
+            "rfid_emulate" => match args.get("path").and_then(|v| v.as_str()) {
+                Some(path) => format!("rfid emulate {}", path),
+                None => return ToolResult::error("Missing required parameter: path"),
+            },
             _ => return ToolResult::error(format!("Unknown rfid tool: {}", tool)),
         };
 
-        match protocol.execute_command(&command) {
+        let timeout_ms: u32 = match tool {
+            "rfid_emulate" => 12_000,
+            _ => 12_000,
+        };
+
+        match protocol.execute_command_with_timeout(&command, timeout_ms) {
             Ok(output) => ToolResult::success(output),
             Err(e) => ToolResult::error(format!("{} failed: {}", tool, e)),
         }

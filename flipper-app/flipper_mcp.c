@@ -48,7 +48,34 @@
 #include <furi_hal_resources.h>
 #include <furi_hal_rtc.h>
 #include <bt/bt_service/bt.h>
+#include <furi_hal_bt.h>
+#include <extra_profiles/hid_profile.h>
+#include "hid_usage_keyboard.h"
 #include <toolbox/version.h>
+
+/* RF tool includes */
+#include <infrared/encoder_decoder/infrared.h>
+#include <infrared/worker/infrared_transmit.h>
+#include <ibutton/ibutton_worker.h>
+#include <ibutton/ibutton_key.h>
+#include <ibutton/ibutton_protocols.h>
+#include <lfrfid/lfrfid_worker.h>
+#include <lfrfid/protocols/lfrfid_protocols.h>
+#include <lfrfid/lfrfid_dict_file.h>
+#include <toolbox/protocols/protocol_dict.h>
+#include <nfc/nfc.h>
+#include <nfc/nfc_scanner.h>
+#include <nfc/nfc_device.h>
+#include <nfc/nfc_poller.h>
+#include <nfc/nfc_listener.h>
+#include <nfc/protocols/nfc_protocol.h>
+#include <subghz/devices/devices.h>
+#include <subghz/devices/cc1101_int/cc1101_int_interconnect.h>
+#include <subghz/transmitter.h>
+#include <subghz/receiver.h>
+#include <subghz/environment.h>
+#include <subghz/subghz_protocol_registry.h>
+#include <subghz/subghz_file_encoder_worker.h>
 
 #include <string.h>
 #include <stdio.h>
@@ -149,6 +176,10 @@ typedef struct {
     FuriMutex* data_mutex;            /* protects status/log/tools/ack buffers */
     volatile bool esp_ready;          /* set true when PONG received from ESP32 */
     volatile bool log_to_sd;          /* when true, LOG| lines also written to SD */
+
+    /* BLE HID profile state (NULL when not active) */
+    FuriHalBleProfileBase* ble_hid_profile;
+    Bt* bt_held;  /* BT service handle, held open during HID session */
 } FlipperMcpApp;
 
 /* Forward declarations for functions used before their definition */
@@ -433,66 +464,1180 @@ static bool
     }
 }
 
+// -- BLE helper tables and functions ------------------------------------------
+
+/** Parse a hex string "0201061A..." into a byte array.
+ *  Returns the number of bytes parsed, or -1 on error. */
+static int hex_to_bytes(const char* hex, uint8_t* out, size_t max_len) {
+    size_t hex_len = strlen(hex);
+    if(hex_len % 2 != 0) return -1;
+    size_t byte_count = hex_len / 2;
+    if(byte_count > max_len || byte_count == 0) return -1;
+    for(size_t i = 0; i < byte_count; i++) {
+        char byte_str[3] = {hex[i * 2], hex[i * 2 + 1], '\0'};
+        char* endptr;
+        unsigned long val = strtoul(byte_str, &endptr, 16);
+        if(*endptr != '\0') return -1;
+        out[i] = (uint8_t)val;
+    }
+    return (int)byte_count;
+}
+
+/** ASCII-to-HID key mapping: [ascii - 0x20] = { hid_keycode, needs_shift }
+ *  US keyboard layout (standard for HID injection). */
+typedef struct {
+    uint8_t keycode;
+    bool shift;
+} AsciiToHid;
+
+static const AsciiToHid ascii_hid_map[95] = {
+    /* 0x20 ' ' */ {HID_KEYBOARD_SPACEBAR, false},
+    /* 0x21 '!' */ {HID_KEYBOARD_1, true},
+    /* 0x22 '"' */ {HID_KEYBOARD_APOSTROPHE, true},
+    /* 0x23 '#' */ {HID_KEYBOARD_3, true},
+    /* 0x24 '$' */ {HID_KEYBOARD_4, true},
+    /* 0x25 '%' */ {HID_KEYBOARD_5, true},
+    /* 0x26 '&' */ {HID_KEYBOARD_7, true},
+    /* 0x27 ''' */ {HID_KEYBOARD_APOSTROPHE, false},
+    /* 0x28 '(' */ {HID_KEYBOARD_9, true},
+    /* 0x29 ')' */ {HID_KEYBOARD_0, true},
+    /* 0x2A '*' */ {HID_KEYBOARD_8, true},
+    /* 0x2B '+' */ {HID_KEYBOARD_EQUAL_SIGN, true},
+    /* 0x2C ',' */ {HID_KEYBOARD_COMMA, false},
+    /* 0x2D '-' */ {HID_KEYBOARD_MINUS, false},
+    /* 0x2E '.' */ {HID_KEYBOARD_DOT, false},
+    /* 0x2F '/' */ {HID_KEYBOARD_SLASH, false},
+    /* 0x30-0x39: '0'-'9' */
+    {HID_KEYBOARD_0, false}, {HID_KEYBOARD_1, false}, {HID_KEYBOARD_2, false},
+    {HID_KEYBOARD_3, false}, {HID_KEYBOARD_4, false}, {HID_KEYBOARD_5, false},
+    {HID_KEYBOARD_6, false}, {HID_KEYBOARD_7, false}, {HID_KEYBOARD_8, false},
+    {HID_KEYBOARD_9, false},
+    /* 0x3A ':' */ {HID_KEYBOARD_SEMICOLON, true},
+    /* 0x3B ';' */ {HID_KEYBOARD_SEMICOLON, false},
+    /* 0x3C '<' */ {HID_KEYBOARD_COMMA, true},
+    /* 0x3D '=' */ {HID_KEYBOARD_EQUAL_SIGN, false},
+    /* 0x3E '>' */ {HID_KEYBOARD_DOT, true},
+    /* 0x3F '?' */ {HID_KEYBOARD_SLASH, true},
+    /* 0x40 '@' */ {HID_KEYBOARD_2, true},
+    /* 0x41-0x5A: 'A'-'Z' (shifted) */
+    {HID_KEYBOARD_A, true}, {HID_KEYBOARD_B, true}, {HID_KEYBOARD_C, true},
+    {HID_KEYBOARD_D, true}, {HID_KEYBOARD_E, true}, {HID_KEYBOARD_F, true},
+    {HID_KEYBOARD_G, true}, {HID_KEYBOARD_H, true}, {HID_KEYBOARD_I, true},
+    {HID_KEYBOARD_J, true}, {HID_KEYBOARD_K, true}, {HID_KEYBOARD_L, true},
+    {HID_KEYBOARD_M, true}, {HID_KEYBOARD_N, true}, {HID_KEYBOARD_O, true},
+    {HID_KEYBOARD_P, true}, {HID_KEYBOARD_Q, true}, {HID_KEYBOARD_R, true},
+    {HID_KEYBOARD_S, true}, {HID_KEYBOARD_T, true}, {HID_KEYBOARD_U, true},
+    {HID_KEYBOARD_V, true}, {HID_KEYBOARD_W, true}, {HID_KEYBOARD_X, true},
+    {HID_KEYBOARD_Y, true}, {HID_KEYBOARD_Z, true},
+    /* 0x5B '[' */ {HID_KEYBOARD_OPEN_BRACKET, false},
+    /* 0x5C '\' */ {HID_KEYBOARD_BACKSLASH, false},
+    /* 0x5D ']' */ {HID_KEYBOARD_CLOSE_BRACKET, false},
+    /* 0x5E '^' */ {HID_KEYBOARD_6, true},
+    /* 0x5F '_' */ {HID_KEYBOARD_MINUS, true},
+    /* 0x60 '`' */ {HID_KEYBOARD_GRAVE_ACCENT, false},
+    /* 0x61-0x7A: 'a'-'z' (unshifted) */
+    {HID_KEYBOARD_A, false}, {HID_KEYBOARD_B, false}, {HID_KEYBOARD_C, false},
+    {HID_KEYBOARD_D, false}, {HID_KEYBOARD_E, false}, {HID_KEYBOARD_F, false},
+    {HID_KEYBOARD_G, false}, {HID_KEYBOARD_H, false}, {HID_KEYBOARD_I, false},
+    {HID_KEYBOARD_J, false}, {HID_KEYBOARD_K, false}, {HID_KEYBOARD_L, false},
+    {HID_KEYBOARD_M, false}, {HID_KEYBOARD_N, false}, {HID_KEYBOARD_O, false},
+    {HID_KEYBOARD_P, false}, {HID_KEYBOARD_Q, false}, {HID_KEYBOARD_R, false},
+    {HID_KEYBOARD_S, false}, {HID_KEYBOARD_T, false}, {HID_KEYBOARD_U, false},
+    {HID_KEYBOARD_V, false}, {HID_KEYBOARD_W, false}, {HID_KEYBOARD_X, false},
+    {HID_KEYBOARD_Y, false}, {HID_KEYBOARD_Z, false},
+    /* 0x7B '{' */ {HID_KEYBOARD_OPEN_BRACKET, true},
+    /* 0x7C '|' */ {HID_KEYBOARD_BACKSLASH, true},
+    /* 0x7D '}' */ {HID_KEYBOARD_CLOSE_BRACKET, true},
+    /* 0x7E '~' */ {HID_KEYBOARD_GRAVE_ACCENT, true},
+};
+
+typedef struct {
+    const char* name;
+    uint16_t keycode;
+} KeyEntry;
+
+static const KeyEntry special_keys[] = {
+    {"ENTER", HID_KEYBOARD_RETURN},
+    {"RETURN", HID_KEYBOARD_RETURN},
+    {"TAB", HID_KEYBOARD_TAB},
+    {"ESC", HID_KEYBOARD_ESCAPE},
+    {"ESCAPE", HID_KEYBOARD_ESCAPE},
+    {"SPACE", HID_KEYBOARD_SPACEBAR},
+    {"BACKSPACE", HID_KEYBOARD_DELETE},
+    {"DELETE", HID_KEYBOARD_DELETE_FORWARD},
+    {"INSERT", HID_KEYBOARD_INSERT},
+    {"HOME", HID_KEYBOARD_HOME},
+    {"END", HID_KEYBOARD_END},
+    {"PAGEUP", HID_KEYBOARD_PAGE_UP},
+    {"PAGEDOWN", HID_KEYBOARD_PAGE_DOWN},
+    {"UP", HID_KEYBOARD_UP_ARROW},
+    {"DOWN", HID_KEYBOARD_DOWN_ARROW},
+    {"LEFT", HID_KEYBOARD_LEFT_ARROW},
+    {"RIGHT", HID_KEYBOARD_RIGHT_ARROW},
+    {"F1", HID_KEYBOARD_F1}, {"F2", HID_KEYBOARD_F2}, {"F3", HID_KEYBOARD_F3},
+    {"F4", HID_KEYBOARD_F4}, {"F5", HID_KEYBOARD_F5}, {"F6", HID_KEYBOARD_F6},
+    {"F7", HID_KEYBOARD_F7}, {"F8", HID_KEYBOARD_F8}, {"F9", HID_KEYBOARD_F9},
+    {"F10", HID_KEYBOARD_F10}, {"F11", HID_KEYBOARD_F11}, {"F12", HID_KEYBOARD_F12},
+    {"PRINTSCREEN", HID_KEYBOARD_PRINT_SCREEN},
+    {"CAPSLOCK", HID_KEYBOARD_CAPS_LOCK},
+    {"SCROLLLOCK", HID_KEYBOARD_SCROLL_LOCK},
+    {"NUMLOCK", HID_KEYPAD_NUMLOCK},
+    {"PAUSE", HID_KEYBOARD_PAUSE},
+};
+#define SPECIAL_KEY_COUNT (sizeof(special_keys) / sizeof(special_keys[0]))
+
+static const KeyEntry modifier_keys[] = {
+    {"CTRL", HID_KEYBOARD_L_CTRL},
+    {"CONTROL", HID_KEYBOARD_L_CTRL},
+    {"SHIFT", HID_KEYBOARD_L_SHIFT},
+    {"ALT", HID_KEYBOARD_L_ALT},
+    {"GUI", HID_KEYBOARD_L_GUI},
+    {"WIN", HID_KEYBOARD_L_GUI},
+    {"WINDOWS", HID_KEYBOARD_L_GUI},
+    {"META", HID_KEYBOARD_L_GUI},
+};
+#define MODIFIER_KEY_COUNT (sizeof(modifier_keys) / sizeof(modifier_keys[0]))
+
+static uint16_t lookup_special_key(const char* name) {
+    for(size_t i = 0; i < SPECIAL_KEY_COUNT; i++) {
+        if(strcasecmp(special_keys[i].name, name) == 0) return special_keys[i].keycode;
+    }
+    return 0;
+}
+
+static uint16_t lookup_modifier(const char* name) {
+    for(size_t i = 0; i < MODIFIER_KEY_COUNT; i++) {
+        if(strcasecmp(modifier_keys[i].name, name) == 0) return modifier_keys[i].keycode;
+    }
+    return 0;
+}
+
 static bool cmd_ble(FlipperMcpApp* app, const char* subcmd, char* result, size_t result_size) {
-    UNUSED(app);
-    /* BLE commands are dispatched to the Flipper's BT service.
-     * BLE scanning requires temporarily disconnecting the mobile app. */
+    /* ---- ble info ---- */
+    if(strcmp(subcmd, "info") == 0) {
+        bool alive = furi_hal_bt_is_alive();
+        bool active = furi_hal_bt_is_active();
+        bool beacon_active = furi_hal_bt_extra_beacon_is_active();
+        FuriHalBtStack stack = furi_hal_bt_get_radio_stack();
+        const char* stack_str = "Unknown";
+        if(stack == FuriHalBtStackLight) stack_str = "Light";
+        else if(stack == FuriHalBtStackFull) stack_str = "Full";
 
-    if(strncmp(subcmd, "scan", 4) == 0) {
-        /* Parse duration: "scan --duration 5" or "scan 5" */
-        int duration = 5;
-        const char* dur_str = strstr(subcmd, "--duration ");
-        if(dur_str) {
-            duration = atoi(dur_str + 11);
-        } else if(subcmd[4] == ' ') {
-            duration = atoi(subcmd + 5);
-        }
-        if(duration < 1) duration = 1;
-        if(duration > 30) duration = 30;
+        FuriString* dump = furi_string_alloc();
+        furi_hal_bt_dump_state(dump);
 
-        /* Open BT service */
-        Bt* bt = furi_record_open(RECORD_BT);
-        bt_disconnect(bt);
-
-        /* Wait for disconnect */
-        furi_delay_ms(500);
-
-        /* BLE GAP scanning is not directly exposed in the public FAP SDK.
-         * For now, report that the BT service was toggled and return a
-         * placeholder. Full scan requires STM32WB BLE stack integration. */
         snprintf(
             result,
             result_size,
-            "BLE scan (%ds): BT service disconnected.\n"
-            "Note: GAP scanning requires STM32WB BLE stack\n"
-            "integration (pending full implementation).\n"
-            "BT service restored.",
-            duration);
-
-        /* Re-enable BT */
-        furi_delay_ms(200);
-        furi_record_close(RECORD_BT);
+            "bt_alive: %s\nbt_active: %s\nradio_stack: %s\n"
+            "extra_beacon: %s\nhid_active: %s\n%s",
+            alive ? "yes" : "no",
+            active ? "yes" : "no",
+            stack_str,
+            beacon_active ? "yes" : "no",
+            app->ble_hid_profile ? "yes" : "no",
+            furi_string_get_cstr(dump));
+        furi_string_free(dump);
         return true;
 
-    } else if(strncmp(subcmd, "connect", 7) == 0) {
-        snprintf(result, result_size, "BLE connect: not yet implemented (requires GAP central role)");
-        return false;
-    } else if(strncmp(subcmd, "disconnect", 10) == 0) {
-        snprintf(result, result_size, "BLE disconnect: not yet implemented");
-        return false;
-    } else if(strncmp(subcmd, "gatt_discover", 13) == 0) {
-        snprintf(result, result_size, "BLE GATT discover: not yet implemented");
-        return false;
-    } else if(strncmp(subcmd, "gatt_read", 9) == 0) {
-        snprintf(result, result_size, "BLE GATT read: not yet implemented");
-        return false;
-    } else if(strncmp(subcmd, "gatt_write", 10) == 0) {
-        snprintf(result, result_size, "BLE GATT write: not yet implemented");
-        return false;
+    /* ---- ble beacon <hex_data> [--mac X] [--interval N] [--power N] ---- */
+    } else if(strncmp(subcmd, "beacon ", 7) == 0) {
+        const char* args_str = subcmd + 7;
+        char hex_data[64] = {0};
+        sscanf(args_str, "%63s", hex_data);
+
+        uint8_t adv_data[EXTRA_BEACON_MAX_DATA_SIZE];
+        int data_len = hex_to_bytes(hex_data, adv_data, EXTRA_BEACON_MAX_DATA_SIZE);
+        if(data_len < 1) {
+            snprintf(result, result_size, "Invalid hex data (1-31 bytes required)");
+            return false;
+        }
+
+        uint16_t interval = 100;
+        uint8_t mac[EXTRA_BEACON_MAC_ADDR_SIZE] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+        bool custom_mac = false;
+
+        const char* p;
+        if((p = strstr(args_str, "--interval ")) != NULL) {
+            interval = (uint16_t)atoi(p + 11);
+            if(interval < 20) interval = 20;
+            if(interval > 10240) interval = 10240;
+        }
+        if((p = strstr(args_str, "--mac ")) != NULL) {
+            char mac_hex[13] = {0};
+            sscanf(p + 6, "%12s", mac_hex);
+            if(hex_to_bytes(mac_hex, mac, 6) == 6) custom_mac = true;
+        }
+
+        if(furi_hal_bt_extra_beacon_is_active()) {
+            furi_hal_bt_extra_beacon_stop();
+        }
+
+        GapExtraBeaconConfig config = {
+            .min_adv_interval_ms = interval,
+            .max_adv_interval_ms = interval,
+            .adv_channel_map = GapAdvChannelMapAll,
+            .adv_power_level = GapAdvPowerLevel_0dBm,
+            .address_type = custom_mac ? GapAddressTypePublic : GapAddressTypeRandom,
+        };
+        memcpy(config.address, mac, EXTRA_BEACON_MAC_ADDR_SIZE);
+
+        if(!furi_hal_bt_extra_beacon_set_config(&config)) {
+            snprintf(result, result_size, "Failed to set beacon config");
+            return false;
+        }
+        if(!furi_hal_bt_extra_beacon_set_data(adv_data, (uint8_t)data_len)) {
+            snprintf(result, result_size, "Failed to set beacon data");
+            return false;
+        }
+        if(!furi_hal_bt_extra_beacon_start()) {
+            snprintf(result, result_size, "Failed to start beacon");
+            return false;
+        }
+
+        snprintf(
+            result,
+            result_size,
+            "Beacon started\ndata: %d bytes\ninterval: %dms\n"
+            "mac: %02X:%02X:%02X:%02X:%02X:%02X",
+            data_len,
+            interval,
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        return true;
+
+    /* ---- ble beacon_stop ---- */
+    } else if(strcmp(subcmd, "beacon_stop") == 0) {
+        if(furi_hal_bt_extra_beacon_is_active()) {
+            furi_hal_bt_extra_beacon_stop();
+        }
+        snprintf(result, result_size, "Beacon stopped");
+        return true;
+
+    /* ---- ble hid_start [--name X] ---- */
+    } else if(strncmp(subcmd, "hid_start", 9) == 0) {
+        if(app->ble_hid_profile) {
+            snprintf(result, result_size, "HID profile already active");
+            return false;
+        }
+
+        char name[9] = "FlpMCP";
+        const char* name_arg = strstr(subcmd, "--name ");
+        if(name_arg) sscanf(name_arg + 7, "%8s", name);
+
+        BleProfileHidParams params = {
+            .device_name_prefix = name,
+            .mac_xor = 0,
+        };
+
+        Bt* bt = furi_record_open(RECORD_BT);
+        app->bt_held = bt;
+
+        app->ble_hid_profile =
+            bt_profile_start(bt, ble_profile_hid, (FuriHalBleProfileParams)&params);
+        if(!app->ble_hid_profile) {
+            furi_record_close(RECORD_BT);
+            app->bt_held = NULL;
+            snprintf(result, result_size, "Failed to start HID profile");
+            return false;
+        }
+
+        snprintf(
+            result,
+            result_size,
+            "BLE HID started as '%s'\n"
+            "WARNING: Mobile app disconnected.\n"
+            "Target must pair to Flipper.\n"
+            "Use ble_hid_stop to restore.",
+            name);
+        return true;
+
+    /* ---- ble hid_type <text> [--delay N] ---- */
+    } else if(strncmp(subcmd, "hid_type ", 9) == 0) {
+        if(!app->ble_hid_profile) {
+            snprintf(result, result_size, "HID not active. Call ble_hid_start first.");
+            return false;
+        }
+
+        const char* text = subcmd + 9;
+        int delay_ms = 30;
+        const char* delay_arg = strstr(text, " --delay ");
+        size_t text_len;
+        if(delay_arg) {
+            text_len = (size_t)(delay_arg - text);
+            delay_ms = atoi(delay_arg + 9);
+            if(delay_ms < 1) delay_ms = 1;
+            if(delay_ms > 500) delay_ms = 500;
+        } else {
+            text_len = strlen(text);
+        }
+
+        size_t typed = 0;
+        for(size_t i = 0; i < text_len; i++) {
+            char c = text[i];
+            /* Handle escaped \n as ENTER */
+            if(c == '\\' && i + 1 < text_len && text[i + 1] == 'n') {
+                ble_profile_hid_kb_press(app->ble_hid_profile, HID_KEYBOARD_RETURN);
+                furi_delay_ms(delay_ms);
+                ble_profile_hid_kb_release(app->ble_hid_profile, HID_KEYBOARD_RETURN);
+                furi_delay_ms(delay_ms);
+                i++; /* skip 'n' */
+                typed++;
+                continue;
+            }
+            if(c < 0x20 || c > 0x7E) continue; /* skip non-printable */
+
+            const AsciiToHid* entry = &ascii_hid_map[c - 0x20];
+            if(entry->shift) {
+                ble_profile_hid_kb_press(app->ble_hid_profile, HID_KEYBOARD_L_SHIFT);
+                furi_delay_ms(5);
+            }
+            ble_profile_hid_kb_press(app->ble_hid_profile, entry->keycode);
+            furi_delay_ms(delay_ms);
+            ble_profile_hid_kb_release(app->ble_hid_profile, entry->keycode);
+            if(entry->shift) {
+                ble_profile_hid_kb_release(app->ble_hid_profile, HID_KEYBOARD_L_SHIFT);
+            }
+            furi_delay_ms(delay_ms);
+            typed++;
+        }
+
+        ble_profile_hid_kb_release_all(app->ble_hid_profile);
+        snprintf(result, result_size, "Typed %zu characters (delay: %dms)", typed, delay_ms);
+        return true;
+
+    /* ---- ble hid_press <KEY_COMBO> ---- */
+    } else if(strncmp(subcmd, "hid_press ", 10) == 0) {
+        if(!app->ble_hid_profile) {
+            snprintf(result, result_size, "HID not active. Call ble_hid_start first.");
+            return false;
+        }
+
+        const char* combo = subcmd + 10;
+        uint16_t modifiers[4] = {0};
+        int mod_count = 0;
+        uint16_t main_key = 0;
+
+        /* Split on '+' manually (strtok_r not in Flipper SDK) */
+        const char* p = combo;
+        while(*p) {
+            while(*p == ' ' || *p == '+') p++;
+            if(!*p) break;
+            const char* tok_start = p;
+            while(*p && *p != '+') p++;
+            /* trim trailing spaces */
+            const char* tok_end = p;
+            while(tok_end > tok_start && *(tok_end - 1) == ' ') tok_end--;
+            size_t tok_len = tok_end - tok_start;
+            if(tok_len == 0) continue;
+
+            char token[32];
+            if(tok_len >= sizeof(token)) tok_len = sizeof(token) - 1;
+            memcpy(token, tok_start, tok_len);
+            token[tok_len] = '\0';
+
+            uint16_t mod = lookup_modifier(token);
+            if(mod) {
+                if(mod_count < 4) modifiers[mod_count++] = mod;
+            } else {
+                uint16_t special = lookup_special_key(token);
+                if(special) {
+                    main_key = special;
+                } else if(tok_len == 1 && token[0] >= 0x20 && token[0] <= 0x7E) {
+                    const AsciiToHid* entry = &ascii_hid_map[(uint8_t)token[0] - 0x20];
+                    main_key = entry->keycode;
+                    if(entry->shift && mod_count < 4) {
+                        modifiers[mod_count++] = HID_KEYBOARD_L_SHIFT;
+                    }
+                } else {
+                    snprintf(result, result_size, "Unknown key: %s", token);
+                    return false;
+                }
+            }
+        }
+
+        for(int i = 0; i < mod_count; i++) {
+            ble_profile_hid_kb_press(app->ble_hid_profile, modifiers[i]);
+            furi_delay_ms(5);
+        }
+        if(main_key) {
+            ble_profile_hid_kb_press(app->ble_hid_profile, main_key);
+            furi_delay_ms(50);
+            ble_profile_hid_kb_release(app->ble_hid_profile, main_key);
+        }
+        for(int i = mod_count - 1; i >= 0; i--) {
+            ble_profile_hid_kb_release(app->ble_hid_profile, modifiers[i]);
+        }
+
+        snprintf(result, result_size, "Key pressed: %s", combo);
+        return true;
+
+    /* ---- ble hid_mouse [dx] [dy] [--button X] [--action X] [--scroll N] ---- */
+    } else if(strncmp(subcmd, "hid_mouse", 9) == 0) {
+        if(!app->ble_hid_profile) {
+            snprintf(result, result_size, "HID not active. Call ble_hid_start first.");
+            return false;
+        }
+
+        const char* args_str = subcmd + 9;
+        int dx = 0, dy = 0, scroll = 0;
+        char button[8] = {0};
+        char action[8] = "click";
+
+        sscanf(args_str, " %d %d", &dx, &dy);
+        const char* p;
+        if((p = strstr(args_str, "--button ")) != NULL) sscanf(p + 9, "%7s", button);
+        if((p = strstr(args_str, "--action ")) != NULL) sscanf(p + 9, "%7s", action);
+        if((p = strstr(args_str, "--scroll ")) != NULL) scroll = atoi(p + 9);
+
+        if(dx > 127) dx = 127;
+        if(dx < -128) dx = -128;
+        if(dy > 127) dy = 127;
+        if(dy < -128) dy = -128;
+        if(scroll > 127) scroll = 127;
+        if(scroll < -128) scroll = -128;
+
+        if(dx != 0 || dy != 0) {
+            ble_profile_hid_mouse_move(app->ble_hid_profile, (int8_t)dx, (int8_t)dy);
+        }
+
+        if(button[0]) {
+            uint8_t btn = 0;
+            if(strcasecmp(button, "LEFT") == 0) btn = 1;
+            else if(strcasecmp(button, "RIGHT") == 0) btn = 2;
+            else if(strcasecmp(button, "MIDDLE") == 0) btn = 4;
+
+            if(btn) {
+                if(strcmp(action, "click") == 0) {
+                    ble_profile_hid_mouse_press(app->ble_hid_profile, btn);
+                    furi_delay_ms(50);
+                    ble_profile_hid_mouse_release(app->ble_hid_profile, btn);
+                } else if(strcmp(action, "press") == 0) {
+                    ble_profile_hid_mouse_press(app->ble_hid_profile, btn);
+                } else if(strcmp(action, "release") == 0) {
+                    ble_profile_hid_mouse_release(app->ble_hid_profile, btn);
+                }
+            }
+        }
+
+        if(scroll != 0) {
+            ble_profile_hid_mouse_scroll(app->ble_hid_profile, (int8_t)scroll);
+        }
+
+        snprintf(
+            result,
+            result_size,
+            "Mouse: dx=%d dy=%d btn=%s act=%s scroll=%d",
+            dx, dy, button[0] ? button : "none", action, scroll);
+        return true;
+
+    /* ---- ble hid_stop ---- */
+    } else if(strcmp(subcmd, "hid_stop") == 0) {
+        if(!app->ble_hid_profile) {
+            snprintf(result, result_size, "HID not active");
+            return true; /* idempotent */
+        }
+
+        ble_profile_hid_kb_release_all(app->ble_hid_profile);
+        ble_profile_hid_mouse_release_all(app->ble_hid_profile);
+
+        if(app->bt_held) {
+            bt_profile_restore_default(app->bt_held);
+            furi_record_close(RECORD_BT);
+            app->bt_held = NULL;
+        }
+        app->ble_hid_profile = NULL;
+
+        snprintf(result, result_size, "BLE HID stopped. Default BT profile restored.");
+        return true;
+
     } else {
-        snprintf(result, result_size, "Unknown BLE command: %.40s", subcmd);
+        snprintf(
+            result,
+            result_size,
+            "Unknown BLE command: %.40s\n"
+            "Valid: info, beacon, beacon_stop, hid_start, hid_type, hid_press, hid_mouse, hid_stop",
+            subcmd);
         return false;
     }
+}
+
+// -- Infrared handler ---------------------------------------------------------
+
+static bool cmd_ir(const char* subcmd, char* result, size_t result_size) {
+    if(strncmp(subcmd, "tx ", 3) == 0) {
+        char protocol_name[32] = {0};
+        uint32_t address = 0;
+        uint32_t command = 0;
+        int repeat = 1;
+
+        int parsed = sscanf(subcmd + 3, "%31s %lx %lx %d", protocol_name, &address, &command, &repeat);
+        if(parsed < 3) {
+            snprintf(result, result_size, "Usage: ir tx <protocol> <address_hex> <command_hex> [repeat]");
+            return false;
+        }
+        if(repeat < 1) repeat = 1;
+        if(repeat > 20) repeat = 20;
+
+        InfraredProtocol proto = infrared_get_protocol_by_name(protocol_name);
+        if(proto == InfraredProtocolUnknown) {
+            snprintf(result, result_size, "Unknown IR protocol: %s", protocol_name);
+            return false;
+        }
+
+        InfraredMessage msg = {
+            .protocol = proto,
+            .address = address,
+            .command = command,
+            .repeat = false,
+        };
+
+        infrared_send(&msg, repeat);
+        snprintf(
+            result,
+            result_size,
+            "IR TX: %s addr=0x%lX cmd=0x%lX repeat=%d",
+            protocol_name,
+            address,
+            command,
+            repeat);
+        return true;
+
+    } else if(strncmp(subcmd, "tx_raw ", 7) == 0) {
+        /* ir tx_raw <frequency> <duty_cycle> <mark> <space> <mark> ... */
+        const char* p = subcmd + 7;
+        uint32_t frequency = 0;
+        float duty_cycle = 0.0f;
+        int offset = 0;
+
+        if(sscanf(p, "%lu %f%n", &frequency, &duty_cycle, &offset) < 2) {
+            snprintf(result, result_size, "Usage: ir tx_raw <freq_hz> <duty_cycle> <timing1> <timing2> ...");
+            return false;
+        }
+        p += offset;
+
+        /* Parse timing values (max 512 entries) */
+        uint32_t timings[512];
+        size_t count = 0;
+        while(count < 512) {
+            uint32_t val = 0;
+            int n = 0;
+            if(sscanf(p, " %lu%n", &val, &n) < 1) break;
+            timings[count++] = val;
+            p += n;
+        }
+        if(count < 2) {
+            snprintf(result, result_size, "Need at least 2 timing values");
+            return false;
+        }
+
+        infrared_send_raw_ext(timings, count, true, frequency, duty_cycle);
+        snprintf(result, result_size, "IR TX raw: %zu timings at %luHz", count, frequency);
+        return true;
+
+    } else {
+        snprintf(result, result_size, "Unknown ir command. Valid: tx, tx_raw");
+        return false;
+    }
+}
+
+// -- iButton handler ----------------------------------------------------------
+
+typedef struct {
+    FuriSemaphore* sem;
+    bool success;
+} IButtonReadCtx;
+
+static void ibutton_read_cb(void* context) {
+    IButtonReadCtx* ctx = context;
+    ctx->success = true;
+    furi_semaphore_release(ctx->sem);
+}
+
+static bool cmd_ibutton(FlipperMcpApp* app, const char* subcmd, char* result, size_t result_size) {
+    if(strncmp(subcmd, "read", 4) == 0) {
+        iButtonProtocols* protocols = ibutton_protocols_alloc();
+        size_t max_size = ibutton_protocols_get_max_data_size(protocols);
+        iButtonKey* key = ibutton_key_alloc(max_size);
+        iButtonWorker* worker = ibutton_worker_alloc(protocols);
+
+        IButtonReadCtx ctx = {
+            .sem = furi_semaphore_alloc(1, 0),
+            .success = false,
+        };
+
+        ibutton_worker_read_set_callback(worker, ibutton_read_cb, &ctx);
+        ibutton_worker_start_thread(worker);
+        ibutton_worker_read_start(worker, key);
+
+        FuriStatus status = furi_semaphore_acquire(ctx.sem, 10000);
+        ibutton_worker_stop(worker);
+        ibutton_worker_stop_thread(worker);
+
+        if(status == FuriStatusOk && ctx.success) {
+            FuriString* uid_str = furi_string_alloc();
+            ibutton_protocols_render_uid(protocols, key, uid_str);
+            iButtonProtocolId proto_id = ibutton_key_get_protocol_id(key);
+            const char* proto_name = ibutton_protocols_get_name(protocols, proto_id);
+            snprintf(
+                result,
+                result_size,
+                "iButton read OK\nprotocol: %s\nuid: %s",
+                proto_name ? proto_name : "unknown",
+                furi_string_get_cstr(uid_str));
+            furi_string_free(uid_str);
+
+            /* If subcmd is "read_and_save <path>", also save the key */
+            if(strncmp(subcmd, "read_and_save ", 14) == 0) {
+                const char* path = subcmd + 14;
+                if(ibutton_protocols_save(protocols, key, path)) {
+                    size_t len = strlen(result);
+                    snprintf(result + len, result_size - len, "\nsaved: %s", path);
+                } else {
+                    size_t len = strlen(result);
+                    snprintf(result + len, result_size - len, "\nsave FAILED: %s", path);
+                }
+            }
+        } else {
+            snprintf(result, result_size, "iButton read timeout — no key detected within 10s");
+        }
+
+        furi_semaphore_free(ctx.sem);
+        ibutton_worker_free(worker);
+        ibutton_key_free(key);
+        ibutton_protocols_free(protocols);
+        return (status == FuriStatusOk && ctx.success);
+
+    } else if(strncmp(subcmd, "emulate ", 8) == 0) {
+        const char* path = subcmd + 8;
+        iButtonProtocols* protocols = ibutton_protocols_alloc();
+        size_t max_size = ibutton_protocols_get_max_data_size(protocols);
+        iButtonKey* key = ibutton_key_alloc(max_size);
+
+        if(!ibutton_protocols_load(protocols, key, path)) {
+            snprintf(result, result_size, "Failed to load iButton file: %s", path);
+            ibutton_key_free(key);
+            ibutton_protocols_free(protocols);
+            return false;
+        }
+
+        ibutton_protocols_emulate_start(protocols, key);
+        furi_delay_ms(10000); /* Emulate for 10 seconds */
+        ibutton_protocols_emulate_stop(protocols, key);
+
+        iButtonProtocolId proto_id = ibutton_key_get_protocol_id(key);
+        const char* proto_name = ibutton_protocols_get_name(protocols, proto_id);
+        snprintf(
+            result,
+            result_size,
+            "iButton emulate done (10s): %s from %s",
+            proto_name ? proto_name : "unknown",
+            path);
+
+        ibutton_key_free(key);
+        ibutton_protocols_free(protocols);
+        return true;
+
+    } else {
+        snprintf(
+            result,
+            result_size,
+            "Unknown ikey command: %.40s\nValid: read, read_and_save <path>, emulate <path>",
+            subcmd);
+        return false;
+    }
+
+    UNUSED(app);
+}
+
+// -- RFID handler -------------------------------------------------------------
+
+typedef struct {
+    FuriSemaphore* sem;
+    LFRFIDWorkerReadResult read_result;
+    ProtocolId protocol;
+} RfidReadCtx;
+
+static void rfid_read_cb(LFRFIDWorkerReadResult result, ProtocolId protocol, void* context) {
+    RfidReadCtx* ctx = context;
+    ctx->read_result = result;
+    ctx->protocol = protocol;
+    if(result == LFRFIDWorkerReadDone) {
+        furi_semaphore_release(ctx->sem);
+    }
+}
+
+static bool cmd_rfid(FlipperMcpApp* app, const char* subcmd, char* result, size_t result_size) {
+    if(strncmp(subcmd, "read", 4) == 0) {
+        ProtocolDict* dict = protocol_dict_alloc(lfrfid_protocols, LFRFIDProtocolMax);
+        LFRFIDWorker* worker = lfrfid_worker_alloc(dict);
+
+        RfidReadCtx ctx = {
+            .sem = furi_semaphore_alloc(1, 0),
+            .read_result = -1,
+            .protocol = PROTOCOL_NO,
+        };
+
+        lfrfid_worker_start_thread(worker);
+        lfrfid_worker_read_start(worker, LFRFIDWorkerReadTypeAuto, rfid_read_cb, &ctx);
+
+        FuriStatus status = furi_semaphore_acquire(ctx.sem, 10000);
+        lfrfid_worker_stop(worker);
+        lfrfid_worker_stop_thread(worker);
+
+        if(status == FuriStatusOk && ctx.protocol != PROTOCOL_NO) {
+            FuriString* uid_str = furi_string_alloc();
+            FuriString* data_str = furi_string_alloc();
+            protocol_dict_render_uid(dict, uid_str, ctx.protocol);
+            protocol_dict_render_data(dict, data_str, ctx.protocol);
+            const char* name = protocol_dict_get_name(dict, ctx.protocol);
+            snprintf(
+                result,
+                result_size,
+                "RFID read OK\nprotocol: %s\nuid: %s\ndata: %s",
+                name ? name : "unknown",
+                furi_string_get_cstr(uid_str),
+                furi_string_get_cstr(data_str));
+            furi_string_free(uid_str);
+            furi_string_free(data_str);
+
+            /* If subcmd is "read_and_save <path>", also save */
+            if(strncmp(subcmd, "read_and_save ", 14) == 0) {
+                const char* path = subcmd + 14;
+                if(lfrfid_dict_file_save(dict, ctx.protocol, path)) {
+                    size_t len = strlen(result);
+                    snprintf(result + len, result_size - len, "\nsaved: %s", path);
+                } else {
+                    size_t len = strlen(result);
+                    snprintf(result + len, result_size - len, "\nsave FAILED: %s", path);
+                }
+            }
+        } else {
+            snprintf(result, result_size, "RFID read timeout — no tag detected within 10s");
+        }
+
+        furi_semaphore_free(ctx.sem);
+        lfrfid_worker_free(worker);
+        protocol_dict_free(dict);
+        return (status == FuriStatusOk && ctx.protocol != PROTOCOL_NO);
+
+    } else if(strncmp(subcmd, "emulate ", 8) == 0) {
+        const char* path = subcmd + 8;
+        ProtocolDict* dict = protocol_dict_alloc(lfrfid_protocols, LFRFIDProtocolMax);
+        ProtocolId proto = lfrfid_dict_file_load(dict, path);
+        if(proto == PROTOCOL_NO) {
+            snprintf(result, result_size, "Failed to load RFID file: %s", path);
+            protocol_dict_free(dict);
+            return false;
+        }
+
+        LFRFIDWorker* worker = lfrfid_worker_alloc(dict);
+        lfrfid_worker_start_thread(worker);
+        lfrfid_worker_emulate_start(worker, (LFRFIDProtocol)proto);
+
+        furi_delay_ms(10000); /* Emulate for 10 seconds */
+
+        lfrfid_worker_stop(worker);
+        lfrfid_worker_stop_thread(worker);
+
+        const char* name = protocol_dict_get_name(dict, proto);
+        snprintf(
+            result,
+            result_size,
+            "RFID emulate done (10s): %s from %s",
+            name ? name : "unknown",
+            path);
+
+        lfrfid_worker_free(worker);
+        protocol_dict_free(dict);
+        return true;
+
+    } else {
+        snprintf(
+            result,
+            result_size,
+            "Unknown rfid command: %.40s\nValid: read, read_and_save <path>, emulate <path>",
+            subcmd);
+        return false;
+    }
+
+    UNUSED(app);
+}
+
+// -- NFC handler --------------------------------------------------------------
+
+typedef struct {
+    FuriSemaphore* sem;
+    NfcProtocol detected_protocols[NfcProtocolNum];
+    size_t detected_count;
+} NfcScanCtx;
+
+static void nfc_scan_cb(NfcScannerEvent event, void* context) {
+    NfcScanCtx* ctx = context;
+    if(event.type == NfcScannerEventTypeDetected) {
+        ctx->detected_count =
+            event.data.protocol_num > NfcProtocolNum ? NfcProtocolNum : event.data.protocol_num;
+        for(size_t i = 0; i < ctx->detected_count; i++) {
+            ctx->detected_protocols[i] = event.data.protocols[i];
+        }
+        furi_semaphore_release(ctx->sem);
+    }
+}
+
+static bool cmd_nfc(FlipperMcpApp* app, const char* subcmd, char* result, size_t result_size) {
+    if(strncmp(subcmd, "detect", 6) == 0) {
+        Nfc* nfc = nfc_alloc();
+        NfcScanner* scanner = nfc_scanner_alloc(nfc);
+
+        NfcScanCtx ctx = {
+            .sem = furi_semaphore_alloc(1, 0),
+            .detected_count = 0,
+        };
+
+        nfc_scanner_start(scanner, nfc_scan_cb, &ctx);
+        FuriStatus status = furi_semaphore_acquire(ctx.sem, 10000);
+        nfc_scanner_stop(scanner);
+
+        if(status == FuriStatusOk && ctx.detected_count > 0) {
+            int off = snprintf(result, result_size, "NFC detected %zu protocol(s):", ctx.detected_count);
+            for(size_t i = 0; i < ctx.detected_count && off < (int)result_size - 1; i++) {
+                const char* name = nfc_device_get_protocol_name(ctx.detected_protocols[i]);
+                off += snprintf(
+                    result + off,
+                    result_size - off,
+                    "\n  - %s",
+                    name ? name : "unknown");
+            }
+        } else {
+            snprintf(result, result_size, "NFC detect timeout — no tag found within 10s");
+        }
+
+        furi_semaphore_free(ctx.sem);
+        nfc_scanner_free(scanner);
+        nfc_free(nfc);
+        return (status == FuriStatusOk && ctx.detected_count > 0);
+
+    } else if(strncmp(subcmd, "emulate ", 8) == 0) {
+        const char* path = subcmd + 8;
+        NfcDevice* device = nfc_device_alloc();
+
+        if(!nfc_device_load(device, path)) {
+            snprintf(result, result_size, "Failed to load NFC file: %s", path);
+            nfc_device_free(device);
+            return false;
+        }
+
+        NfcProtocol proto = nfc_device_get_protocol(device);
+        Nfc* nfc = nfc_alloc();
+        NfcListener* listener = nfc_listener_alloc(
+            nfc, proto, nfc_device_get_data(device, proto));
+
+        nfc_listener_start(listener, NULL, NULL);
+        furi_delay_ms(30000); /* Emulate for 30 seconds */
+        nfc_listener_stop(listener);
+
+        const char* name = nfc_device_get_protocol_name(proto);
+        snprintf(
+            result,
+            result_size,
+            "NFC emulate done (30s): %s from %s",
+            name ? name : "unknown",
+            path);
+
+        nfc_listener_free(listener);
+        nfc_free(nfc);
+        nfc_device_free(device);
+        return true;
+
+    } else {
+        snprintf(
+            result,
+            result_size,
+            "Unknown nfc command: %.40s\nValid: detect, emulate <path>",
+            subcmd);
+        return false;
+    }
+
+    UNUSED(app);
+}
+
+// -- SubGHz handler -----------------------------------------------------------
+
+typedef struct {
+    FuriSemaphore* sem;
+    FuriString* decoded_text;
+    bool got_signal;
+} SubGhzRxCtx;
+
+static void subghz_rx_callback(
+    SubGhzReceiver* recv,
+    SubGhzProtocolDecoderBase* decoder,
+    void* ctx_ptr) {
+    UNUSED(recv);
+    SubGhzRxCtx* rctx = ctx_ptr;
+    if(!rctx->got_signal) {
+        rctx->got_signal = true;
+        FuriString* text = furi_string_alloc();
+        subghz_protocol_decoder_base_get_string(decoder, text);
+        furi_string_set(rctx->decoded_text, text);
+        furi_string_free(text);
+        furi_semaphore_release(rctx->sem);
+    }
+}
+
+static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, size_t result_size) {
+    if(strncmp(subcmd, "tx_from_file ", 13) == 0) {
+        /* Transmit from .sub file using file encoder worker */
+        const char* path = subcmd + 13;
+
+        SubGhzEnvironment* env = subghz_environment_alloc();
+        subghz_environment_set_protocol_registry(env, &subghz_protocol_registry);
+
+        subghz_devices_init();
+        const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
+        if(!device || !subghz_devices_begin(device)) {
+            snprintf(result, result_size, "Failed to init CC1101");
+            subghz_devices_deinit();
+            subghz_environment_free(env);
+            return false;
+        }
+
+        SubGhzFileEncoderWorker* file_worker = subghz_file_encoder_worker_alloc();
+        if(!subghz_file_encoder_worker_start(file_worker, path, SUBGHZ_DEVICE_CC1101_INT_NAME)) {
+            snprintf(result, result_size, "Failed to load .sub file: %s", path);
+            subghz_file_encoder_worker_free(file_worker);
+            subghz_devices_end(device);
+            subghz_devices_deinit();
+            subghz_environment_free(env);
+            return false;
+        }
+
+        /* The file encoder worker reads frequency/preset from the file and
+         * handles async TX internally. Wait for completion or timeout. */
+        uint32_t start = furi_get_tick();
+        while(subghz_file_encoder_worker_is_running(file_worker)) {
+            furi_delay_ms(50);
+            if(furi_get_tick() - start > 10000) break; /* 10s safety timeout */
+        }
+
+        subghz_file_encoder_worker_stop(file_worker);
+        subghz_file_encoder_worker_free(file_worker);
+        subghz_devices_sleep(device);
+        subghz_devices_end(device);
+        subghz_devices_deinit();
+        subghz_environment_free(env);
+
+        snprintf(result, result_size, "SubGHz TX from file done: %s", path);
+        return true;
+
+    } else if(strncmp(subcmd, "tx ", 3) == 0) {
+        /* tx <protocol> <key_hex> <frequency> */
+        char protocol_name[32] = {0};
+        char key_hex[32] = {0};
+        uint32_t frequency = 0;
+
+        int parsed = sscanf(subcmd + 3, "%31s %31s %lu", protocol_name, key_hex, &frequency);
+        if(parsed < 3) {
+            snprintf(result, result_size, "Usage: subghz tx <protocol> <key_hex> <frequency>");
+            return false;
+        }
+
+        subghz_devices_init();
+        const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
+        if(!device || !subghz_devices_begin(device)) {
+            snprintf(result, result_size, "Failed to init CC1101");
+            subghz_devices_deinit();
+            return false;
+        }
+
+        if(!subghz_devices_is_frequency_valid(device, frequency)) {
+            snprintf(result, result_size, "Invalid frequency: %lu", frequency);
+            subghz_devices_end(device);
+            subghz_devices_deinit();
+            return false;
+        }
+
+        SubGhzEnvironment* env = subghz_environment_alloc();
+        subghz_environment_set_protocol_registry(env, &subghz_protocol_registry);
+
+        SubGhzTransmitter* transmitter =
+            subghz_transmitter_alloc_init(env, protocol_name);
+        if(!transmitter) {
+            snprintf(result, result_size, "Unknown SubGHz protocol: %s", protocol_name);
+            subghz_environment_free(env);
+            subghz_devices_end(device);
+            subghz_devices_deinit();
+            return false;
+        }
+
+        /* Build a FlipperFormat in memory with the key data */
+        FlipperFormat* ff = flipper_format_string_alloc();
+        flipper_format_write_header_cstr(ff, "Flipper SubGhz Key File", 1);
+        flipper_format_write_uint32(ff, "Frequency", &frequency, 1);
+        const char* preset_name = "FuriHalSubGhzPresetOok650Async";
+        flipper_format_write_string_cstr(ff, "Preset", preset_name);
+        flipper_format_write_string_cstr(ff, "Protocol", protocol_name);
+
+        /* Parse key hex string to uint64_t */
+        uint64_t key_val = 0;
+        for(const char* kp = key_hex; *kp; kp++) {
+            char c = *kp;
+            uint8_t nib = 0;
+            if(c >= '0' && c <= '9') nib = c - '0';
+            else if(c >= 'A' && c <= 'F') nib = 10 + c - 'A';
+            else if(c >= 'a' && c <= 'f') nib = 10 + c - 'a';
+            else continue;
+            key_val = (key_val << 4) | nib;
+        }
+
+        /* Count bits from hex length (each hex char = 4 bits) */
+        uint32_t bit_count = 0;
+        for(const char* kp = key_hex; *kp; kp++) {
+            char c = *kp;
+            if((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))
+                bit_count += 4;
+        }
+        if(bit_count == 0) bit_count = 32;
+
+        flipper_format_write_uint32(ff, "Bit", &bit_count, 1);
+        flipper_format_write_hex_uint64(ff, "Key", &key_val, 1);
+        flipper_format_rewind(ff);
+
+        SubGhzProtocolStatus status = subghz_transmitter_deserialize(transmitter, ff);
+        flipper_format_free(ff);
+
+        if(status != SubGhzProtocolStatusOk) {
+            snprintf(result, result_size, "Failed to build TX signal (status=%d)", (int)status);
+            subghz_transmitter_free(transmitter);
+            subghz_environment_free(env);
+            subghz_devices_end(device);
+            subghz_devices_deinit();
+            return false;
+        }
+
+        subghz_devices_set_frequency(device, frequency);
+        subghz_devices_load_preset(device, FuriHalSubGhzPresetOok650Async, NULL);
+
+        if(!subghz_devices_set_tx(device)) {
+            snprintf(result, result_size, "CC1101 TX failed (frequency blocked or busy)");
+            subghz_transmitter_free(transmitter);
+            subghz_environment_free(env);
+            subghz_devices_end(device);
+            subghz_devices_deinit();
+            return false;
+        }
+
+        subghz_devices_start_async_tx(device, subghz_transmitter_yield, transmitter);
+
+        /* Wait for TX completion or timeout */
+        uint32_t start = furi_get_tick();
+        while(!subghz_devices_is_async_complete_tx(device)) {
+            furi_delay_ms(10);
+            if(furi_get_tick() - start > 5000) break;
+        }
+
+        subghz_devices_stop_async_tx(device);
+        subghz_transmitter_free(transmitter);
+        subghz_devices_idle(device);
+        subghz_devices_end(device);
+        subghz_devices_deinit();
+        subghz_environment_free(env);
+
+        snprintf(
+            result,
+            result_size,
+            "SubGHz TX: %s key=%s freq=%lu bit=%lu",
+            protocol_name,
+            key_hex,
+            frequency,
+            bit_count);
+        return true;
+
+    } else if(strncmp(subcmd, "rx ", 3) == 0) {
+        /* rx <frequency> [duration_ms] */
+        uint32_t frequency = 0;
+        uint32_t duration_ms = 5000;
+
+        sscanf(subcmd + 3, "%lu %lu", &frequency, &duration_ms);
+        if(frequency == 0) {
+            snprintf(result, result_size, "Usage: subghz rx <frequency> [duration_ms]");
+            return false;
+        }
+        if(duration_ms < 1000) duration_ms = 1000;
+        if(duration_ms > 30000) duration_ms = 30000;
+
+        subghz_devices_init();
+        const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
+        if(!device || !subghz_devices_begin(device)) {
+            snprintf(result, result_size, "Failed to init CC1101");
+            subghz_devices_deinit();
+            return false;
+        }
+
+        if(!subghz_devices_is_frequency_valid(device, frequency)) {
+            snprintf(result, result_size, "Invalid frequency: %lu", frequency);
+            subghz_devices_end(device);
+            subghz_devices_deinit();
+            return false;
+        }
+
+        SubGhzEnvironment* env = subghz_environment_alloc();
+        subghz_environment_set_protocol_registry(env, &subghz_protocol_registry);
+
+        SubGhzReceiver* receiver = subghz_receiver_alloc_init(env);
+        subghz_receiver_set_filter(receiver, SubGhzProtocolFlag_Decodable);
+
+        SubGhzRxCtx rx_ctx = {
+            .sem = furi_semaphore_alloc(1, 0),
+            .decoded_text = furi_string_alloc(),
+            .got_signal = false,
+        };
+
+        subghz_receiver_set_rx_callback(receiver, subghz_rx_callback, &rx_ctx);
+
+        subghz_devices_set_frequency(device, frequency);
+        subghz_devices_load_preset(device, FuriHalSubGhzPresetOok650Async, NULL);
+        subghz_devices_set_rx(device);
+        subghz_devices_start_async_rx(device, subghz_receiver_decode, receiver);
+
+        furi_semaphore_acquire(rx_ctx.sem, duration_ms);
+
+        subghz_devices_stop_async_rx(device);
+        subghz_devices_idle(device);
+
+        if(rx_ctx.got_signal) {
+            snprintf(
+                result,
+                result_size,
+                "SubGHz RX at %luHz:\n%s",
+                frequency,
+                furi_string_get_cstr(rx_ctx.decoded_text));
+        } else {
+            snprintf(
+                result,
+                result_size,
+                "SubGHz RX at %luHz: no signal decoded within %lums",
+                frequency,
+                duration_ms);
+        }
+
+        furi_string_free(rx_ctx.decoded_text);
+        furi_semaphore_free(rx_ctx.sem);
+        subghz_receiver_free(receiver);
+        subghz_devices_end(device);
+        subghz_devices_deinit();
+        subghz_environment_free(env);
+        return rx_ctx.got_signal;
+
+    } else {
+        snprintf(
+            result,
+            result_size,
+            "Unknown subghz command: %.40s\nValid: tx, rx, tx_from_file",
+            subcmd);
+        return false;
+    }
+
+    UNUSED(app);
 }
 
 // -- CLI relay: dispatcher ----------------------------------------------------
@@ -525,6 +1670,16 @@ static void cli_dispatch(FlipperMcpApp* app, const char* command) {
         ok = cmd_storage(app, command + 8, result, sizeof(result));
     } else if(strncmp(command, "ble ", 4) == 0) {
         ok = cmd_ble(app, command + 4, result, sizeof(result));
+    } else if(strncmp(command, "ir ", 3) == 0) {
+        ok = cmd_ir(command + 3, result, sizeof(result));
+    } else if(strncmp(command, "ikey ", 5) == 0) {
+        ok = cmd_ibutton(app, command + 5, result, sizeof(result));
+    } else if(strncmp(command, "rfid ", 5) == 0) {
+        ok = cmd_rfid(app, command + 5, result, sizeof(result));
+    } else if(strncmp(command, "nfc ", 4) == 0) {
+        ok = cmd_nfc(app, command + 4, result, sizeof(result));
+    } else if(strncmp(command, "subghz ", 7) == 0) {
+        ok = cmd_subghz(app, command + 7, result, sizeof(result));
     } else if(strcmp(command, "free") == 0) {
         ok = cmd_free(result, sizeof(result));
     } else if(strcmp(command, "uptime") == 0) {
@@ -1517,6 +2672,22 @@ int32_t flipper_mcp_app(void* p) {
     view_free(app->result_view);
     view_free(app->scroll_view);
     view_dispatcher_free(app->view_dispatcher);
+
+    /* Clean up BLE HID if still active */
+    if(app->ble_hid_profile) {
+        ble_profile_hid_kb_release_all(app->ble_hid_profile);
+        ble_profile_hid_mouse_release_all(app->ble_hid_profile);
+        if(app->bt_held) {
+            bt_profile_restore_default(app->bt_held);
+            furi_record_close(RECORD_BT);
+        }
+        app->ble_hid_profile = NULL;
+        app->bt_held = NULL;
+    }
+    /* Stop extra beacon if active */
+    if(furi_hal_bt_extra_beacon_is_active()) {
+        furi_hal_bt_extra_beacon_stop();
+    }
 
     uart_cleanup(app);
 

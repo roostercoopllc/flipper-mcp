@@ -71,8 +71,6 @@ impl McpServer {
         method: &str,
         params: &Option<Value>,
     ) -> std::io::Result<()> {
-        info!("MCP request: {} (id={})", method, id);
-
         match method {
             "initialize" => {
                 info!("MCP initialize — capability negotiation");

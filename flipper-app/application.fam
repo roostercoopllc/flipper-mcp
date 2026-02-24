@@ -8,4 +8,5 @@ App(
     fap_category="Tools",
     fap_version=(2, 0),
     fap_description="Manage the Flipper MCP WiFi board — direct UART communication with ESP32.",
+    fap_libs=["ble_profile"],
 )
