@@ -182,6 +182,73 @@ See [RELAY.md](docs/RELAY.md#cloud-deployment-opentofu) for full instructions.
 
 Custom tools can be added via TOML config files or by installing FAP apps on the SD card.
 
+## Free Alternative: Open WebUI + Ollama
+
+You don't need a Claude subscription to use flipper-mcp. [Open WebUI](https://github.com/open-webui/open-webui) is a free, self-hosted ChatGPT-style interface that natively supports MCP Streamable HTTP (v0.6.31+). Pair it with [Ollama](https://ollama.com/) for fully local, offline AI-driven Flipper control.
+
+### 1. Install Ollama and pull a tool-capable model
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull a model with tool-calling support
+ollama pull llama3.1        # 8B — good balance of speed and capability
+# or: ollama pull qwen2.5   # strong tool-calling, good at structured output
+# or: ollama pull mistral    # lightweight, fast tool use
+```
+
+### 2. Start Open WebUI
+
+```bash
+# Docker (recommended) — connects to Ollama on localhost automatically
+docker run -d -p 3000:8080 \
+  --add-host=host.docker.internal:host-gateway \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  -e WEBUI_AUTH=False \
+  -v open-webui:/app/backend/data \
+  --name open-webui \
+  ghcr.io/open-webui/open-webui:main
+
+# Or without Docker:
+pip install open-webui
+open-webui serve
+```
+
+Open **http://localhost:3000** in your browser.
+
+### 3. Connect the Flipper MCP server
+
+1. Go to **Admin Settings** (gear icon) → **External Tools**
+2. Click **+ Add Server**
+3. Set **Type** to **MCP (Streamable HTTP)**
+4. Enter the server URL:
+   - Local: `http://flipper-mcp.local:8080/mcp` (or `http://192.168.x.x:8080/mcp`)
+   - Via relay: `https://relay.example.com/mcp`
+   - From Docker: use `http://host.docker.internal:8080/mcp` if the Flipper is on the Docker host's network
+5. Set **Authentication** to **None** (flipper-mcp has no auth)
+6. **Save**
+
+> **Tip:** Under **Workspace → Models → (your model) → Advanced Parameters**, set **Function Calling** to **Default** for smaller models. Only switch to **Native** for models with strong built-in tool support (Llama 3.1 8B+, Qwen 2.5, Mistral).
+
+### 4. Example prompts
+
+Once connected, try these in the Open WebUI chat:
+
+| Prompt | What it does |
+|--------|-------------|
+| "Scan for NFC tags near the Flipper" | Calls `nfc_detect` to read nearby tags |
+| "List all files on the Flipper's SD card" | Calls `storage_list` on `/ext` |
+| "Transmit this SubGHz signal on 433.92 MHz: ..." | Calls `subghz_tx` with the given frequency |
+| "Read any RFID card that's presented to the Flipper" | Calls `rfid_read` and returns tag data |
+| "What apps are installed on the Flipper?" | Calls `app_list` to enumerate installed FAPs |
+| "Send this IR signal to turn off the TV" | Calls `ir_tx` with the specified protocol and data |
+| "Show me the Flipper's system info and free memory" | Calls `system_info` + `system_free` |
+| "Read the NFC tag, then save its data to /ext/nfc/captured.nfc" | Multi-step: `nfc_read` → `storage_write` |
+| "Monitor 315 MHz for 10 seconds and decode anything you hear" | Calls `subghz_rx` with frequency and duration |
+
+**Multi-step agentic tasks** work best with larger models (Llama 3.1 70B, Qwen 2.5 72B, or cloud models via OpenAI-compatible APIs). Smaller models handle single-tool calls reliably.
+
 ## Project Structure
 
 ```
