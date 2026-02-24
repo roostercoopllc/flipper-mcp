@@ -8,8 +8,8 @@
 ///   5. Relay routes each response to the waiting HTTP handler via the pending map
 use std::sync::Arc;
 
-use axum::extract::{State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -176,7 +176,7 @@ pub async fn send_to_device(
 
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
         Ok(Ok(response)) => Ok(Some(response)),
-        Ok(Err(_)) => Err(StatusCode::BAD_GATEWAY),     // device disconnected
-        Err(_) => Err(StatusCode::GATEWAY_TIMEOUT),     // 30s timeout
+        Ok(Err(_)) => Err(StatusCode::BAD_GATEWAY), // device disconnected
+        Err(_) => Err(StatusCode::GATEWAY_TIMEOUT), // 30s timeout
     }
 }

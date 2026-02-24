@@ -10,8 +10,8 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response, Sse};
 use axum::response::sse::Event;
+use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
 use axum::Router;
 use futures_util::{stream, StreamExt};
@@ -30,19 +30,13 @@ pub fn router(state: Arc<TunnelState>) -> Router {
 }
 
 /// POST /mcp — forward JSON-RPC to device, return response
-async fn mcp_post_handler(
-    State(state): State<Arc<TunnelState>>,
-    body: Bytes,
-) -> Response {
+async fn mcp_post_handler(State(state): State<Arc<TunnelState>>, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8 body").into_response(),
     };
 
-    info!(
-        "POST /mcp ({} bytes) → device",
-        body_str.len()
-    );
+    info!("POST /mcp ({} bytes) → device", body_str.len());
 
     match send_to_device(&state, body_str).await {
         Ok(Some(response)) => (
@@ -74,11 +68,9 @@ async fn sse_handler(State(state): State<Arc<TunnelState>>) -> Response {
     let endpoint_event = format!("/messages?sessionId={}", session_id);
     info!("SSE session {} started", session_id);
 
-    let events = stream::iter(vec![
-        Ok::<Event, std::convert::Infallible>(
-            Event::default().event("endpoint").data(endpoint_event),
-        ),
-    ])
+    let events = stream::iter(vec![Ok::<Event, std::convert::Infallible>(
+        Event::default().event("endpoint").data(endpoint_event),
+    )])
     .chain(stream::unfold((), |_| async {
         tokio::time::sleep(std::time::Duration::from_secs(25)).await;
         Some((
