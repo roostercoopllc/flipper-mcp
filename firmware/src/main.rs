@@ -90,13 +90,20 @@ fn main() -> Result<()> {
             match msg {
                 FapMessage::Config(payload) => {
                     settings.merge_from_pipe_pairs(&payload);
+                    // Always send ACK to acknowledge receipt, even if SSID is invalid
+                    let mut ack_result = "err:no_ssid";
                     if !settings.wifi_ssid.is_empty() {
-                        info!("Received WiFi config from FAP");
+                        info!("Received WiFi config from FAP with valid SSID");
                         if let Err(e) = nvs_config.save_settings(&settings) {
                             error!("Failed to save config to NVS: {}", e);
+                            ack_result = "err:nv_save";
+                        } else {
+                            ack_result = "ok";
                         }
-                        fap.lock().unwrap().push_ack("config", "ok");
+                    } else {
+                        warn!("Received CONFIG from FAP but SSID is empty");
                     }
+                    fap.lock().unwrap().push_ack("config", ack_result);
                 }
                 FapMessage::Ping => {
                     fap.lock().unwrap().push_status("status=needs_config");
@@ -172,11 +179,22 @@ fn main() -> Result<()> {
                         match msg {
                             FapMessage::Config(payload) => {
                                 settings.merge_from_pipe_pairs(&payload);
-                                if let Err(e2) = nvs_config.save_settings(&settings) {
+                                let mut ack_result = "err:config_update";
+
+                                if settings.wifi_ssid.is_empty() {
+                                    warn!("CONFIG received but SSID is empty");
+                                    ack_result = "err:no_ssid";
+                                } else if let Err(e2) = nvs_config.save_settings(&settings) {
                                     warn!("NVS save: {}", e2);
+                                    ack_result = "err:nv_save";
+                                } else if let Err(e2) = wifi::reconfigure(&mut wifi, &settings) {
+                                    warn!("WiFi reconfigure failed: {}", e2);
+                                    ack_result = "err:wifi_reconfig";
+                                } else {
+                                    info!("CONFIG updated during WiFi retry, reconfigured successfully");
+                                    ack_result = "ok";
                                 }
-                                wifi::reconfigure(&mut wifi, &settings)?;
-                                fap.lock().unwrap().push_ack("config", "ok");
+                                fap.lock().unwrap().push_ack("config", ack_result);
                             }
                             FapMessage::Cmd(cmd) => {
                                 info!("FAP command during WiFi retry: {}", cmd);

@@ -122,6 +122,7 @@ typedef enum {
     MenuTools,
     MenuRefresh,
     MenuLoadSdConfig,
+    MenuSettings,
     MenuToggleSdLog,
 } MenuItem;
 
@@ -176,6 +177,8 @@ typedef struct {
     FuriMutex* data_mutex;            /* protects status/log/tools/ack buffers */
     volatile bool esp_ready;          /* set true when PONG received from ESP32 */
     volatile bool log_to_sd;          /* when true, LOG| lines also written to SD */
+    char log_file_path[256];          /* configurable SD log file path */
+    int log_level;                    /* 0=errors, 1=normal (default), 2=verbose */
 
     /* BLE HID profile state (NULL when not active) */
     FuriHalBleProfileBase* ble_hid_profile;
@@ -1981,56 +1984,51 @@ static uint16_t read_file_to_buf(
 
 // -- SD card log helpers ------------------------------------------------------
 
-/** Trim the log file to LOG_TRIM_TO bytes, keeping the tail (newest lines). */
-static void sd_log_trim(FlipperMcpApp* app) {
-    File* f = storage_file_alloc(app->storage);
-    if(!storage_file_open(f, LOG_FILE, FSAM_READ, FSOM_OPEN_EXISTING)) {
-        storage_file_free(f);
-        return;
-    }
-    uint64_t size = storage_file_size(f);
-    if(size <= LOG_MAX_SIZE) {
-        storage_file_close(f);
-        storage_file_free(f);
-        return;
-    }
-    /* Seek past the portion we want to discard, read the rest */
-    uint32_t skip = (uint32_t)(size - LOG_TRIM_TO);
-    storage_file_seek(f, skip, true);
-    char* buf = malloc(LOG_TRIM_TO + 1);
-    if(!buf) {
-        storage_file_close(f);
-        storage_file_free(f);
-        return;
-    }
-    uint16_t n = storage_file_read(f, buf, LOG_TRIM_TO);
-    storage_file_close(f);
-    /* Find first newline so we start at a clean line boundary */
-    char* start = memchr(buf, '\n', n);
-    if(start) {
-        start++; /* skip past the newline */
-        uint32_t keep = n - (uint32_t)(start - buf);
-        if(storage_file_open(f, LOG_FILE, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
-            storage_file_write(f, start, keep);
-            storage_file_close(f);
-        }
-    }
-    free(buf);
-    storage_file_free(f);
-}
-
 /** Append a single log line to the SD card log file (if SD logging enabled). */
 static void sd_log_append(FlipperMcpApp* app, const char* msg) {
     if(!app->log_to_sd) return;
-    storage_simply_mkdir(app->storage, DATA_DIR);
+
+    /* Create parent directory of log file */
+    char dir_path[256];
+    strncpy(dir_path, app->log_file_path, sizeof(dir_path) - 1);
+    dir_path[sizeof(dir_path) - 1] = '\0';
+    /* Find last slash and null-terminate at it */
+    char* last_slash = strrchr(dir_path, '/');
+    if(last_slash) {
+        *last_slash = '\0';
+        storage_simply_mkdir(app->storage, dir_path);
+    }
+
     File* f = storage_file_alloc(app->storage);
-    if(storage_file_open(f, LOG_FILE, FSAM_WRITE, FSOM_OPEN_APPEND)) {
+    if(storage_file_open(f, app->log_file_path, FSAM_WRITE, FSOM_OPEN_APPEND)) {
         uint64_t size = storage_file_size(f);
         if(size > LOG_MAX_SIZE) {
             storage_file_close(f);
-            sd_log_trim(app);
+            /* Trim the file (keep last half) */
+            File* f_read = storage_file_alloc(app->storage);
+            if(storage_file_open(f_read, app->log_file_path, FSAM_READ, FSOM_OPEN_EXISTING)) {
+                uint64_t new_size = size / 2;
+                uint8_t* buf = malloc(new_size);
+                if(buf) {
+                    storage_file_seek(f_read, new_size, true);
+                    uint64_t read = storage_file_read(f_read, buf, new_size);
+                    storage_file_close(f_read);
+                    storage_file_free(f_read);
+                    /* Rewrite file with second half */
+                    if(storage_file_open(f, app->log_file_path, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+                        storage_file_write(f, buf, read);
+                        storage_file_close(f);
+                    }
+                    free(buf);
+                } else {
+                    storage_file_close(f_read);
+                    storage_file_free(f_read);
+                }
+            } else {
+                storage_file_free(f_read);
+            }
             /* Reopen for append after trim */
-            if(!storage_file_open(f, LOG_FILE, FSAM_WRITE, FSOM_OPEN_APPEND)) {
+            if(!storage_file_open(f, app->log_file_path, FSAM_WRITE, FSOM_OPEN_APPEND)) {
                 storage_file_free(f);
                 return;
             }
@@ -2040,6 +2038,16 @@ static void sd_log_append(FlipperMcpApp* app, const char* msg) {
         storage_file_close(f);
     }
     storage_file_free(f);
+}
+
+/** Get SD log file size in bytes, or -1 if file doesn't exist */
+static int64_t sd_log_get_size(FlipperMcpApp* app) {
+    if(!app->storage) return -1;
+    FileInfo file_info;
+    if(storage_common_stat(app->storage, app->log_file_path, &file_info) == FSE_OK) {
+        return file_info.size;
+    }
+    return -1;
 }
 
 // -- Actions ------------------------------------------------------------------
@@ -2197,14 +2205,16 @@ static void action_save_config(FlipperMcpApp* app) {
     uart_send(app, config_line);
 
     /* Also write config.txt to SD as a human-readable backup */
-    char file_content[320];
+    char file_content[768];
     snprintf(
         file_content, sizeof(file_content),
-        "wifi_ssid=%s\nwifi_password=%s\nrelay_url=%s\nlog_to_sd=%d\n",
+        "wifi_ssid=%s\nwifi_password=%s\nrelay_url=%s\nlog_to_sd=%d\nlog_level=%d\nlog_file_path=%s\n",
         app->ssid_buf,
         app->pass_buf,
         app->relay_buf,
-        app->log_to_sd ? 1 : 0);
+        app->log_to_sd ? 1 : 0,
+        app->log_level,
+        app->log_file_path);
     write_file_str(app, CONFIG_FILE, file_content);
 
     /* Wait briefly for ACK */
@@ -2273,6 +2283,10 @@ static void action_load_sd_config(FlipperMcpApp* app) {
             strncpy(relay, p + 10, sizeof(relay) - 1);
         else if(strncmp(p, "log_to_sd=", 10) == 0)
             app->log_to_sd = (p[10] == '1');
+        else if(strncmp(p, "log_level=", 10) == 0)
+            app->log_level = atoi(p + 10);
+        else if(strncmp(p, "log_file_path=", 14) == 0)
+            strncpy(app->log_file_path, p + 14, sizeof(app->log_file_path) - 1);
 
         if(!nl_ptr) break;
         p = nl_ptr + 1;
@@ -2447,6 +2461,7 @@ static void build_menu(FlipperMcpApp* app) {
     submenu_add_item(app->menu, "Tools List",      MenuTools,     menu_cb, app);
     submenu_add_item(app->menu, "Refresh Modules", MenuRefresh,      menu_cb, app);
     submenu_add_item(app->menu, "Load SD Config",  MenuLoadSdConfig, menu_cb, app);
+    submenu_add_item(app->menu, "SD Logging Settings", MenuSettings,  menu_cb, app);
     submenu_add_item(app->menu,
         app->log_to_sd ? "SD Log: ON" : "SD Log: OFF",
         MenuToggleSdLog, menu_cb, app);
@@ -2522,6 +2537,38 @@ static void menu_cb(void* context, uint32_t index) {
         app->current_view = ViewIdResult;
         view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdResult);
         break;
+
+    case MenuSettings: {
+        int64_t log_size = sd_log_get_size(app);
+        const char* log_level_name[] = {"Errors", "Normal", "Verbose"};
+        const char* level_str = (app->log_level >= 0 && app->log_level <= 2) ?
+            log_level_name[app->log_level] : "Unknown";
+
+        snprintf(app->text_buf, TEXT_BUF_LEN,
+            "SD Logging Settings\n\n"
+            "Status: %s\n"
+            "Level: %s (0=Err, 1=Norm, 2=Verb)\n"
+            "Path: %s\n"
+            "Size: %s\n\n"
+            "To change:\n"
+            "- Edit /ext/apps_data/flipper_mcp/config.txt\n"
+            "- log_to_sd=0|1\n"
+            "- log_level=0|1|2\n"
+            "- log_file_path=/path/to/log\n\n"
+            "To clear logs, remove\n"
+            "the log file manually\n"
+            "on the SD card.",
+            app->log_to_sd ? "ON" : "OFF",
+            level_str,
+            app->log_file_path,
+            (log_size >= 0) ? (log_size > 1024*1024 ? "large (>1MB)" : "OK") : "not found");
+
+        strncpy(app->scroll_title, "Logging Config", sizeof(app->scroll_title) - 1);
+        app->scroll_offset = 0;
+        app->current_view = ViewIdScrollText;
+        view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdScrollText);
+        break;
+    }
 
     case MenuToggleSdLog:
         app->log_to_sd = !app->log_to_sd;
@@ -2625,6 +2672,14 @@ int32_t flipper_mcp_app(void* p) {
     furi_check(app);
     memset(app, 0, sizeof(FlipperMcpApp));
     app->current_view = ViewIdMenu;
+
+    /* Initialize logging defaults */
+    app->log_to_sd = true;  /* enabled by default */
+    app->log_level = 1;     /* 0=errors, 1=normal, 2=verbose */
+    strncpy(
+        app->log_file_path,
+        "/ext/apps_data/flipper_mcp/logs.txt",
+        sizeof(app->log_file_path) - 1);
 
     app->gui           = furi_record_open(RECORD_GUI);
     app->storage       = furi_record_open(RECORD_STORAGE);
