@@ -319,11 +319,11 @@ flipper-mcp/
 - [RELAY.md](docs/RELAY.md) — Remote access setup
 - [HARDWARE.md](docs/HARDWARE.md) — Wiring and hardware details
 - [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — Common issues and fixes
-- [DESIGN.md](docs/DESIGN.md) — Implementation plan and phases
+- [DESIGN.md](docs/DESIGN.md) — Technical design and system architecture
 
 ## For AI Agents
 
-See [AGENTS.md](AGENTS.md) for complete project context, technical specifications, implementation phases, and everything needed to continue development on this project.
+See [AGENTS.md](AGENTS.md) for complete project context, technical specifications, system architecture, and everything needed to continue development on this project.
 
 ## License
 

@@ -1,4 +1,4 @@
-# Flipper Zero MCP Server — Implementation Plan
+# Flipper Zero MCP Server — Technical Design
 
 ## Context
 
@@ -127,277 +127,156 @@ flipper-mcp/
 
 ---
 
-## Phase 1: Project Scaffolding & UART Communication
+## Core Components
 
-**Goal**: ESP32-S2 boots, connects to WiFi, and can send CLI commands to the Flipper Zero over UART and read responses.
+### 1. WiFi & Network Connectivity
 
-### Files to create:
-- Workspace `Cargo.toml`, `firmware/Cargo.toml`, `.cargo/config.toml`, `sdkconfig.defaults`, `build.rs`, `cfg.toml`
-- `src/main.rs` — init logging, WiFi (STA only), UART, send `device_info` as smoke test
-- `src/wifi/mod.rs`, `src/wifi/station.rs` — connect to hardcoded/NVS WiFi
-- `src/uart/mod.rs`, `src/uart/transport.rs` — UART driver setup (115200 baud, GPIO pins)
-- `src/uart/cli.rs` — send command string, read until prompt, parse response
-- `src/uart/protocol.rs` — `FlipperProtocol` trait definition
-- `src/config/mod.rs`, `src/config/nvs.rs`, `src/config/settings.rs`
+**Files**: `src/wifi/station.rs`, `src/wifi/ap.rs`, `src/wifi/manager.rs`, `src/config/nvs.rs`, `src/config/settings.rs`
 
-### Key dependencies (firmware):
-```toml
-[dependencies]
-esp-idf-svc = { version = "0.49", features = ["binstart"] }
-esp-idf-hal = "0.44"
-log = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
+**Responsibility**: Initialize WiFi in STA mode (connect to existing network), provide AP mode fallback with captive portal for initial configuration, manage NVS storage for persistent WiFi credentials.
+
+**Key Features**:
+- **STA Mode**: Connect to configured WiFi SSID using credentials from NVS or config file
+- **AP Mode**: Fallback hotspot (`FlipperMCP-XXXX`) with captive portal for setting WiFi without external tools
+- **Dual-mode Manager**: Boot with STA, fall back to AP if connection fails, periodic connectivity monitoring
+- **NVS Persistence**: Store WiFi credentials, device name, relay URL across reboots
+
+**Architecture**:
+```rust
+// Config stored in NVS
+pub struct Settings {
+    pub wifi_ssid: String,
+    pub wifi_password: String,
+    pub device_name: String,
+    pub relay_url: Option<String>,
+}
 ```
 
-### Key details:
-- UART TX/RX pins: GPIO 1 (TX) and GPIO 2 (RX) — match Flipper expansion header pinout
-- CLI framing: send `command\r\n`, read until `>: ` prompt or timeout (500ms)
-- `FlipperProtocol` trait with `execute_command`, `list_apps`, `launch_app`, `get_device_info`
-- `CliProtocol` implements the trait by formatting text commands and parsing text output
-- `RpcProtocol` is a stub returning `Err("not yet implemented")`
+---
 
-### Verification:
-- Flash firmware, open serial monitor
-- Observe: WiFi connects, UART sends `device_info`, response logged
-- Run `power info` and `ps` to confirm bidirectional communication
+### 2. UART & Device Communication
+
+**Files**: `src/uart/transport.rs`, `src/uart/cli.rs`, `src/uart/protocol.rs`, `src/uart/rpc.rs`
+
+**Responsibility**: Establish reliable serial communication with Flipper Zero at 115200 baud, handle CLI command transmission, parse responses, provide abstraction layer for protocol variants.
+
+**Key Features**:
+- **UART Framing**: Send `command\r\n`, receive until `>: ` prompt or 500ms timeout
+- **CLI Protocol** (active): Text-based command execution with response parsing
+- **Protobuf RPC** (stub): Placeholder for future binary protocol
+- **Error Handling**: Timeout recovery, retry logic, fallback response modes
+
+**Protocol Trait**:
+```rust
+pub trait FlipperProtocol: Send + Sync {
+    fn execute_command(&mut self, cmd: &str) -> Result<String>;
+    fn list_apps(&mut self) -> Result<Vec<String>>;
+    fn launch_app(&mut self, name: &str) -> Result<()>;
+    fn get_device_info(&mut self) -> Result<DeviceInfo>;
+}
+```
 
 ---
 
-## Phase 2: MCP Server Core + HTTP
+### 3. HTTP Server & MCP Protocol
 
-**Goal**: HTTP server responds to MCP JSON-RPC 2.0 requests with tool listing and basic execution.
+**Files**: `src/mcp/server.rs`, `src/mcp/jsonrpc.rs`, `src/mcp/types.rs`, `src/mcp/tools.rs`, `src/mcp/transport/streamable.rs`, `src/mcp/transport/sse.rs`
 
-### Files to create:
-- `src/mcp/mod.rs`, `src/mcp/server.rs`, `src/mcp/jsonrpc.rs`, `src/mcp/types.rs`
-- `src/mcp/tools.rs` — tool registry
-- `src/mcp/transport/mod.rs`, `src/mcp/transport/streamable.rs`
+**Responsibility**: Implement HTTP server (port 8080) with MCP JSON-RPC 2.0 protocol, handle client capability negotiation, dispatch tool execution requests, support multiple MCP transport variants.
 
-### Key details:
-- **JSON-RPC 2.0** implementation (hand-rolled, ~200 lines):
-  - Parse `{"jsonrpc":"2.0","id":1,"method":"...","params":{...}}`
-  - Route to handlers: `initialize`, `tools/list`, `tools/call`, `resources/list`
-  - Return `{"jsonrpc":"2.0","id":1,"result":{...}}` or `error`
-- **Streamable HTTP transport**:
-  - Single endpoint `POST /mcp` — accepts JSON-RPC, returns JSON response
-  - `GET /mcp` — SSE stream for server-initiated notifications (optional)
-  - Content-Type negotiation per MCP spec
-- **EspHttpServer** setup:
-  - Register handlers for `POST /mcp`, `GET /mcp`, `GET /health`
-  - Parse request body, dispatch to MCP server, serialize response
-- **Capability negotiation** (`initialize`):
-  - Server declares: `tools`, `resources` capabilities
-  - Returns server name, version, protocol version
-- **Tool registry**: `HashMap<String, Box<dyn Fn(Value) -> Result<Value>>>`
-  - Register a single test tool `system_info` to validate the pipeline
+**Key Features**:
+- **JSON-RPC 2.0**: Full request/response handling with error codes, batch support
+- **Streamable HTTP** (primary): Single endpoint `/mcp` for both requests and SSE notifications
+- **Legacy SSE** (backward compatible): Dual endpoints `/sse` and `/messages?sessionId=xxx`
+- **Tool Registry**: Dynamic tool registration from modules with JSON Schema parameter definitions
+- **Server Capabilities**: Declare supported features (tools, resources) to clients
 
-### Verification:
-- Flash, connect to ESP32's IP
-- `curl -X POST http://<ip>:8080/mcp -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}'`
-- Get back capability response
-- Call `tools/list`, see `system_info` tool
-- Call `tools/call` with `system_info`, get Flipper device info back
+**Protocol Flow**:
+1. Client → `initialize` → Server returns capabilities
+2. Client → `tools/list` → Server returns all available tools with schemas
+3. Client → `tools/call` → Server executes tool, returns structured result
+4. Server → Server notifications (if client supports SSE)
 
 ---
 
-## Phase 3: Built-in Modules + Module Framework
+### 4. Module System & Tool Registry
 
-**Goal**: All default Flipper apps are exposed as MCP tools via the module system.
+**Files**: `src/modules/traits.rs`, `src/modules/registry.rs`, `src/modules/builtin/*.rs`, `src/modules/discovery.rs`, `src/modules/config.rs`
 
-### Files to create:
-- `src/modules/mod.rs`, `src/modules/traits.rs`, `src/modules/registry.rs`
-- All `src/modules/builtin/*.rs` files (subghz, nfc, rfid, infrared, gpio, badusb, ibutton, storage, system)
+**Responsibility**: Provide extensible interface for exposing Flipper capabilities as tools, implement all built-in modules (~30 tools across 9 categories), support dynamic FAP app discovery and config-driven tool definition.
 
-### Key details:
-- **`FlipperModule` trait**:
-  ```rust
-  pub trait FlipperModule: Send + Sync {
-      fn name(&self) -> &str;
-      fn description(&self) -> &str;
-      fn tools(&self) -> Vec<ToolDefinition>;
-      fn execute(&self, tool: &str, params: &Value, proto: &mut dyn FlipperProtocol) -> Result<Value>;
-  }
-  ```
-- **`ModuleRegistry`**: holds `Vec<Box<dyn FlipperModule>>`, provides:
-  - `list_all_tools()` — aggregates tools from all modules
-  - `dispatch(tool_name, params)` — finds owning module, calls execute
-- **Built-in module example** (`SubGhzModule`):
-  - Tools: `subghz_tx` (frequency, protocol, key), `subghz_rx` (frequency, duration), `subghz_decode_raw` (file_path), `subghz_chat` (message)
-  - Each tool maps to CLI command: e.g., `subghz tx <protocol> <key> <freq>`
-  - Returns parsed output as structured JSON
-- **Tool definitions** include JSON Schema for parameters (MCP spec requirement)
-- **All built-in modules**: ~30 tools total across 9 modules
-
-### Verification:
-- `tools/list` returns all ~30 tools with schemas
-- `tools/call` with `nfc_detect` sends `nfc detect` over UART, returns parsed result
-- `tools/call` with `storage_list` path="/ext/apps" returns directory listing
-- Test each module category with at least one tool call
+**Key Features**:
+- **FlipperModule Trait**: Standard interface for module implementation
+- **Module Registry**: Central dispatcher for tool lookup and execution
+- **Built-in Modules**:
+  - SubGHz: TX, RX, decode, chat (wireless transmission)
+  - NFC: Detect, read, emulate, field operations
+  - RFID: Read, emulate, write operations
+  - Infrared: TX, RX, learn remote codes
+  - GPIO: Read, write, set mode
+  - BadUSB: Run scripts, generate HID sequences
+  - iButton: Read, emulate 1-Wire keys
+  - Storage: List, read, write, delete SD card files
+  - System: Device info, power management, process listing, memory info
+  - BLE: Beacon broadcast, HID emulation, keyboard, mouse
+- **FAP Discovery**: Auto-scan SD card for `.fap` apps and create launch tools
+- **TOML Configuration**: Define custom tools via config files
 
 ---
 
-## Phase 4: Dynamic Module Discovery
+### 5. Remote Access & Relay Tunnel
 
-**Goal**: New FAP apps and config-defined tools are auto-discovered and exposed as MCP tools.
+**Firmware Files**: `src/tunnel/client.rs`, `src/tunnel/mdns.rs`
 
-### Files to create:
-- `src/modules/discovery.rs` — FAP scanner
-- `src/modules/config.rs` — TOML config loader
-- `config/modules.example.toml`
+**Relay Files**: `relay/src/main.rs`, `relay/src/tunnel.rs`, `relay/src/proxy.rs`
 
-### Key details:
-- **FAP Discovery** (`discovery.rs`):
-  - Runs `storage list /ext/apps` and subfolders via UART
-  - Parses output to find `.fap` files
-  - Creates generic tool for each: `launch_app_{name}` with args parameter
-  - Re-scans on `modules/refresh` MCP method or periodic timer (every 60s)
-- **Config-driven modules** (`config.rs`):
-  - TOML file stored in ESP32 NVS or read from Flipper SD card
-  - Format:
-    ```toml
-    [[module]]
-    name = "custom_scanner"
-    description = "Custom frequency scanner"
-    [[module.tool]]
-    name = "scan_range"
-    description = "Scan frequency range"
-    command_template = "subghz rx {frequency}"
-    params = [
-      { name = "frequency", type = "number", required = true, description = "Frequency in Hz" }
-    ]
-    ```
-  - Config modules parsed at startup and on refresh
-- **Unified registry**: built-in + FAP-discovered + config-driven all live in same registry
+**Responsibility**: Enable cross-network access through reverse WebSocket tunnel, manage device identity and routing, support multiple simultaneous Flippers on relay server.
 
-### Verification:
-- Install a FAP on Flipper SD card
-- Call `tools/list` — new FAP appears as launchable tool
-- Edit config TOML, call `modules/refresh` — new tools appear
-- Call a config-defined tool, verify correct CLI command is sent
+**Firmware Tunnel Client**:
+- Outbound WebSocket connection to relay server
+- Device ID in handshake for identification
+- Automatic reconnection with exponential backoff (5s → 10s → 30s → 60s max)
+- Transparent request/response forwarding
+
+**Relay Server**:
+- Accept WebSocket connections from multiple Flippers (by device ID)
+- HTTP endpoints (`/mcp`, `/sse`, `/messages`) that proxy to connected Flipper
+- Health endpoint for monitoring
+- Support for path-based or header-based routing
+
+**mDNS Advertisement**:
+- Service type: `_mcp._tcp`
+- Hostname: `flipper-mcp` (configurable)
+- Clients discover as `flipper-mcp.local:8080`
 
 ---
 
-## Phase 5: Legacy SSE Transport + WiFi AP Mode
+### 6. Runtime Configuration & Settings Management
 
-**Goal**: Full MCP transport compatibility and zero-config WiFi setup.
+**Files**: `src/config/settings.rs`, `src/config/nvs.rs`, `config/modules.example.toml`
 
-### Files to create:
-- `src/mcp/transport/sse.rs` — Legacy SSE dual-endpoint transport
-- `src/wifi/ap.rs` — AP mode with captive portal
-- `src/wifi/manager.rs` — dual-mode manager
+**Responsibility**: Manage device configuration (WiFi, relay URL, device name), provide persistent storage via NVS, load module definitions from TOML files.
 
-### Key details:
-- **Legacy SSE transport**:
-  - `GET /sse` — SSE connection, sends endpoint URI in first event
-  - `POST /messages?sessionId=xxx` — JSON-RPC requests
-  - Session management with timeout
-- **AP mode**:
-  - SSID: `FlipperMCP-XXXX` (last 4 of MAC)
-  - No password (open network for easy config)
-  - DNS redirect all domains to captive portal
-  - Simple HTML page: enter SSID + password, save to NVS, reboot into STA
-- **WiFi manager**:
-  - Boot: try STA with NVS credentials (10s timeout)
-  - If STA fails: start AP mode
-  - If STA connects: start mDNS + HTTP server
-  - Periodic connectivity check, re-enter AP if disconnected for >60s
+**Configuration Sources**:
+1. **Defaults**: Built-in reasonable defaults (WiFi AP, no relay)
+2. **NVS Storage**: Persist across reboots (WiFi credentials, device name)
+3. **SD Card**: TOML files for module configuration and custom tools
+4. **Runtime**: Updates via server control commands
 
-### Verification:
-- Boot with no WiFi creds — AP mode activates, connect phone, configure WiFi
-- Reboot — STA mode connects
-- Legacy SSE client connects and exchanges MCP messages
-- Streamable HTTP still works simultaneously
+**Configuration Structure**:
+```toml
+[server]
+device_name = "flipper-mcp"
+wifi_ssid = "YourNetwork"
+wifi_password = "YourPassword"
+relay_url = "ws://relay.example.com:9090/tunnel"
 
----
-
-## Phase 6: Reverse WebSocket Tunnel + mDNS
-
-**Goal**: Flipper is accessible remotely via relay, and locally via `flipper-mcp.local`.
-
-### Files to create:
-- `src/tunnel/mod.rs`, `src/tunnel/client.rs`, `src/tunnel/mdns.rs`
-- `relay/Cargo.toml`, `relay/src/main.rs`, `relay/src/tunnel.rs`, `relay/src/proxy.rs`
-
-### Key details:
-- **mDNS** (`mdns.rs`):
-  - Advertise `_mcp._tcp` service via `EspMdns` from esp-idf-svc
-  - Hostname: configurable, default `flipper-mcp`
-  - Clients discover via `flipper-mcp.local:8080`
-- **WebSocket tunnel client** (`client.rs`):
-  - Connects to relay URL from config (e.g., `ws://relay.example.com:9090/tunnel`)
-  - Sends device ID in handshake headers
-  - Receives MCP JSON-RPC requests over WS, forwards to local MCP server
-  - Sends responses back over WS
-  - Auto-reconnect with exponential backoff (5s, 10s, 30s, 60s max)
-- **Relay server** (`relay/`):
-  - Dependencies: `tokio`, `axum`, `tokio-tungstenite`, `clap`
-  - `GET /tunnel` — WebSocket endpoint, Flipper connects here
-  - `POST /mcp` and `GET /mcp` — MCP endpoints, proxied to connected Flipper
-  - `GET /sse` + `POST /messages` — Legacy SSE, proxied
-  - `GET /health` — relay status + connected device info
-  - Supports multiple Flippers: route by device ID header or path prefix
-  - CLI: `flipper-mcp-relay --listen 0.0.0.0:9090`
-
-### Verification:
-- Start relay on laptop: `flipper-mcp-relay --listen 0.0.0.0:9090`
-- Flash Flipper with relay URL configured
-- From different machine: `curl http://laptop-ip:9090/mcp` reaches Flipper
-- mDNS: `ping flipper-mcp.local` resolves on same LAN
-- Disconnect WiFi, reconnect — tunnel auto-reconnects
-
----
-
-## Phase 7: Documentation, Scripts & Polish
-
-**Goal**: Complete docs, helper scripts, CI, and production hardening.
-
-### Files to create:
-- All `docs/*.md` files
-- All `scripts/*.sh` files
-- `README.md`, `.gitignore`, `LICENSE`, `.github/workflows/ci.yml`
-
-### Documentation outline:
-- **README.md**: Project overview, architecture diagram, 5-minute quickstart, feature list
-- **SETUP.md**: Prerequisites, toolchain install, building, flashing, first connection
-- **ARCHITECTURE.md**: Component diagram, data flow, module system, protocol details
-- **API.md**: Every MCP tool with name, description, parameters, example request/response
-- **MODULE_DEVELOPMENT.md**: How to write config modules, how to add built-in modules
-- **RELAY.md**: Relay setup (local, VPS, Docker), multi-Flipper routing, security
-- **TROUBLESHOOTING.md**: WiFi issues, UART issues, flash issues, MCP client config, LED codes
-- **HARDWARE.md**: Pin connections, board variants, power considerations
-
-### Scripts:
-- `setup-toolchain.sh` — install `espup`, Rust toolchain, `espflash`, `ldproxy`
-- `build.sh` — `cargo build --release --target xtensa-esp32s2-espidf`
-- `flash.sh` — `espflash flash --monitor target/.../flipper-mcp`
-- `monitor.sh` — `espflash monitor`
-- `build-relay.sh` — `cargo build --release -p flipper-mcp-relay`
-- `wifi-config.sh` — write WiFi SSID/password to NVS partition
-
-### CI:
-- GitHub Actions: check firmware compiles (xtensa target), check relay compiles (x86_64)
-- Lint with clippy, format check with rustfmt
-
-### Verification:
-- Fresh clone on new machine, follow SETUP.md, working system
-- All scripts run without errors
-- CI passes on push
-- Claude Desktop can connect to relay and list/call tools
-
----
-
-## Implementation Order Summary
-
-| Phase | Deliverable | Key Risk |
-|-------|------------|----------|
-| 1 | UART + WiFi STA boot | Pin mapping, UART framing timing |
-| 2 | MCP HTTP server + JSON-RPC | Memory usage of HTTP + JSON parsing |
-| 3 | All built-in modules (~30 tools) | CLI output parsing edge cases |
-| 4 | FAP discovery + config modules | Storage list parsing, TOML in NVS |
-| 5 | SSE transport + AP captive portal | DNS redirect on ESP32, session mgmt |
-| 6 | WebSocket tunnel + mDNS + relay | WS client stability, relay routing |
-| 7 | Docs, scripts, CI | Keeping docs in sync with code |
+[[modules]]
+name = "custom_scanner"
+[[modules.tools]]
+name = "scan_frequency"
+command_template = "subghz rx {frequency}"
+```
 
 ---
 
