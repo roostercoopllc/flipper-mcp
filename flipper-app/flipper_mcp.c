@@ -506,14 +506,8 @@ static void cli_dispatch(FlipperMcpApp* app, const char* command) {
         snprintf(result, sizeof(result), "powering off");
         ok = true;
     } else if(strncmp(command, "power reboot", 12) == 0) {
-        snprintf(result, sizeof(result), "rebooting");
-        ok = true;
-        /* Send response before reboot */
-        char escaped[1024];
-        escape_newlines(result, escaped, sizeof(escaped));
-        char response[1100];
-        snprintf(response, sizeof(response), "CLI_OK|%s", escaped);
-        uart_send(app, response);
+        /* Send response before reboot — use small inline buffer */
+        uart_send(app, "CLI_OK|rebooting");
         furi_delay_ms(100);
         furi_hal_power_reset();
         return; /* won't reach here */
