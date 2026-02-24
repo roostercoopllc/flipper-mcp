@@ -49,3 +49,6 @@ Desktop.ini
 *.bak
 *.orig
 *.tmp
+
+# Compiled Flipper apps
+*.fap
