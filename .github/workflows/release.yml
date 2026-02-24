@@ -27,10 +27,9 @@ jobs:
           fetch-depth: 0  # Full history for git tags
 
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          profile: minimal
+          components: rustfmt, clippy
 
       - name: Install ESP-IDF dependencies
         run: |
