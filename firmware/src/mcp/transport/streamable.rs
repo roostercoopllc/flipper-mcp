@@ -13,6 +13,13 @@ use super::sse::{register_sse_handlers, SseState};
 
 const MAX_REQUEST_BODY: usize = 16384; // 16KB
 
+const CORS_HEADERS: &[(&str, &str)] = &[
+    ("Access-Control-Allow-Origin", "*"),
+    ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+    ("Access-Control-Allow-Headers", "Content-Type, Accept"),
+    ("Access-Control-Max-Age", "86400"),
+];
+
 /// Adapter: wraps an `esp_idf_svc::io::Write` implementor as a `std::io::Write`
 /// so that `serde_json::to_writer` can stream JSON directly to the HTTP response.
 struct StdIoWriter<W>(W);
@@ -37,7 +44,7 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
     let config = Configuration {
         http_port: 8080,
         stack_size: 10240,
-        max_uri_handlers: 8,
+        max_uri_handlers: 10,
         ..Default::default()
     };
 
@@ -72,13 +79,18 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
                 // allocating the full JSON string in memory (fixes OOM on tools/list
                 // with 30+ tools on ESP32-S2's 320KB heap).
                 let resp = request
-                    .into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
+                    .into_response(200, Some("OK"), &[
+                        ("Content-Type", "application/json"),
+                        ("Access-Control-Allow-Origin", "*"),
+                    ])?;
                 let mut writer = StdIoWriter(resp);
                 serde_json::to_writer(&mut writer, &response)
                     .map_err(|e| anyhow::anyhow!("JSON serialization: {e}"))?;
             }
             None => {
-                request.into_response(202, Some("Accepted"), &[])?;
+                request.into_response(202, Some("Accepted"), &[
+                    ("Access-Control-Allow-Origin", "*"),
+                ])?;
             }
         }
 
@@ -123,6 +135,20 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
         Ok(())
     })
     .map_err(|e| anyhow::anyhow!("Failed to register GET /openapi.json: {e}"))?;
+
+    // OPTIONS /mcp — CORS preflight
+    http.fn_handler::<anyhow::Error, _>("/mcp", Method::Options, |request| {
+        request.into_response(204, Some("No Content"), CORS_HEADERS)?;
+        Ok(())
+    })
+    .map_err(|e| anyhow::anyhow!("Failed to register OPTIONS /mcp: {e}"))?;
+
+    // OPTIONS /openapi.json — CORS preflight
+    http.fn_handler::<anyhow::Error, _>("/openapi.json", Method::Options, |request| {
+        request.into_response(204, Some("No Content"), CORS_HEADERS)?;
+        Ok(())
+    })
+    .map_err(|e| anyhow::anyhow!("Failed to register OPTIONS /openapi.json: {e}"))?;
 
     // Legacy SSE handlers: GET /sse and POST /messages
     register_sse_handlers(&mut http, server, sse_state)?;
