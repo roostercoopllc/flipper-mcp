@@ -111,6 +111,52 @@ curl http://flipper-mcp.local:8080/health
 ./scripts/test-connection.sh 192.168.x.xxx
 ```
 
+#### Test MCP tools directly with curl
+
+Get the Flipper's IP from the **Flipper MCP → Status** menu, then test:
+
+**BLE beacon broadcast** (transmit spoofed BLE advertisement):
+```bash
+curl -X POST http://192.168.0.58:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ble_beacon","arguments":{"data":"020106"}}}'
+```
+
+**BLE HID keyboard** (emulate a wireless keyboard and type):
+```bash
+# Start HID emulation
+curl -X POST http://192.168.0.58:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ble_hid_start","arguments":{}}}'
+
+# Type a message
+curl -X POST http://192.168.0.58:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ble_hid_type","arguments":{"text":"Hello from Flipper!"}}}'
+
+# Stop HID emulation
+curl -X POST http://192.168.0.58:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ble_hid_stop","arguments":{}}}'
+```
+
+**IR transmit** (send IR remote control codes):
+```bash
+# NEC protocol IR code (generic TV power button)
+curl -X POST http://192.168.0.58:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ir_tx","arguments":{"protocol":"NEC","address":"00","command":"01","repeat":0}}}'
+```
+
+**SubGHz receive** (listen for wireless signals on 433.92 MHz):
+```bash
+curl -X POST http://192.168.0.58:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"subghz_rx","arguments":{"frequency":433920000,"duration":5000}}}'
+```
+
+Replace `192.168.0.58` with your Flipper's actual IP address.
+
 Then add to your Claude Desktop config (`claude_desktop_config.json`):
 ```json
 {
@@ -178,7 +224,7 @@ See [RELAY.md](docs/RELAY.md#cloud-deployment-opentofu) for full instructions.
 | iButton | `ibutton_read`, `ibutton_emulate` | 1-Wire key fobs |
 | Storage | `storage_list`, `storage_read`, `storage_write`, `storage_remove`, `storage_stat` | SD card file management |
 | System | `system_device_info`, `system_power_info`, `system_power_reboot`, `system_ps`, `system_free`, `system_uptime` | Device management |
-| BLE | `ble_scan`, `ble_connect`, `ble_disconnect`, `ble_gatt_discover`, `ble_gatt_read`, `ble_gatt_write` | Bluetooth Low Energy |
+| BLE | `ble_info`, `ble_beacon`, `ble_beacon_stop`, `ble_hid_start`, `ble_hid_type`, `ble_hid_press`, `ble_hid_mouse`, `ble_hid_stop` | Bluetooth Low Energy (beacon broadcast + HID emulation) |
 | Apps | `app_launch_{name}` (auto-discovered from SD card) | Application management |
 
 Custom tools can be added via TOML config files or by installing FAP apps on the SD card. See [OPERATIONS.md](docs/OPERATIONS.md) for copy-paste curl commands for every tool.
