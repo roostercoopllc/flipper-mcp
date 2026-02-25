@@ -28,7 +28,3 @@ pub fn reconfigure(wifi: &mut BlockingWifi<EspWifi<'static>>, settings: &Setting
     station::reconfigure(wifi, settings)
 }
 
-/// Scan for visible APs. Returns summary string for logging.
-pub fn scan_aps(wifi: &mut BlockingWifi<EspWifi<'static>>) -> String {
-    station::scan_aps(wifi)
-}

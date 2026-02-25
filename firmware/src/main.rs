@@ -179,21 +179,20 @@ fn main() -> Result<()> {
                         match msg {
                             FapMessage::Config(payload) => {
                                 settings.merge_from_pipe_pairs(&payload);
-                                let mut ack_result = "err:config_update";
 
-                                if settings.wifi_ssid.is_empty() {
+                                let ack_result = if settings.wifi_ssid.is_empty() {
                                     warn!("CONFIG received but SSID is empty");
-                                    ack_result = "err:no_ssid";
+                                    "err:no_ssid"
                                 } else if let Err(e2) = nvs_config.save_settings(&settings) {
                                     warn!("NVS save: {}", e2);
-                                    ack_result = "err:nv_save";
+                                    "err:nv_save"
                                 } else if let Err(e2) = wifi::reconfigure(&mut wifi, &settings) {
                                     warn!("WiFi reconfigure failed: {}", e2);
-                                    ack_result = "err:wifi_reconfig";
+                                    "err:wifi_reconfig"
                                 } else {
                                     info!("CONFIG updated during WiFi retry, reconfigured successfully");
-                                    ack_result = "ok";
-                                }
+                                    "ok"
+                                };
                                 fap.lock().unwrap().push_ack("config", ack_result);
                             }
                             FapMessage::Cmd(cmd) => {

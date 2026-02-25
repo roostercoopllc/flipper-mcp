@@ -53,31 +53,6 @@ pub fn reconfigure(wifi: &mut BlockingWifi<EspWifi<'static>>, settings: &Setting
     apply_config(wifi, settings)
 }
 
-/// Scan for visible APs. Returns a summary string for FAP logging.
-pub fn scan_aps(wifi: &mut BlockingWifi<EspWifi<'static>>) -> String {
-    match wifi.scan() {
-        Ok(aps) => {
-            info!("Scan found {} APs:", aps.len());
-            let mut summary = format!("Scan: {} APs.", aps.len());
-            for ap in aps.iter().take(5) {
-                info!(
-                    "  '{}' ch={} rssi={} auth={:?}",
-                    ap.ssid, ap.channel, ap.signal_strength, ap.auth_method
-                );
-                // Add first few to summary for FAP display
-                if summary.len() < 120 {
-                    summary.push_str(&format!(" '{}' {}dBm", ap.ssid, ap.signal_strength));
-                }
-            }
-            summary
-        }
-        Err(e) => {
-            warn!("AP scan failed: {}", e);
-            format!("Scan failed: {}", e)
-        }
-    }
-}
-
 /// Map the config string to an ESP-IDF AuthMethod.
 ///
 /// Valid values: "wpa2", "wpa3", "wpa2wpa3", "open", or "" (auto).

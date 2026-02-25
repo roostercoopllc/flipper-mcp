@@ -72,8 +72,8 @@ jobs:
             gperf ccache cmake ninja-build libffi-dev libssl-dev \
             dfu-util libusb-1.0-0
 
-      - name: Install espup
-        run: cargo install espup
+      - name: Install espup and ldproxy
+        run: cargo install espup ldproxy
 
       - name: Install Xtensa Rust toolchain
         run: |

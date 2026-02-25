@@ -43,8 +43,8 @@ jobs:
             pkg-config \
             git
 
-      - name: Install espup
-        run: cargo install espup
+      - name: Install espup and ldproxy
+        run: cargo install espup ldproxy
 
       - name: Install ESP-IDF toolchain
         run: |
