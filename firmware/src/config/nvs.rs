@@ -61,6 +61,10 @@ impl NvsConfig {
             settings.wifi_auth = auth;
             info!("NVS: wifi_auth loaded");
         }
+        if let Some(mac) = self.read_str("wifi_mac") {
+            settings.wifi_mac = mac;
+            info!("NVS: wifi_mac loaded");
+        }
     }
 
     /// Persist current settings to NVS.
@@ -70,6 +74,7 @@ impl NvsConfig {
         self.write_str("device_name", &settings.device_name)?;
         self.write_str("relay_url", &settings.relay_url)?;
         self.write_str("wifi_auth", &settings.wifi_auth)?;
+        self.write_str("wifi_mac", &settings.wifi_mac)?;
         info!("NVS: settings saved");
         Ok(())
     }

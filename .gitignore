@@ -52,3 +52,6 @@ Desktop.ini
 
 # Compiled Flipper apps
 *.fap
+
+# White Paper Artifacts
+defcon/

@@ -7,6 +7,15 @@ use log::{info, warn};
 
 use crate::config::Settings;
 
+// FFI bindings for ESP-IDF WiFi MAC address setting
+extern "C" {
+    fn esp_wifi_set_mac(ifx: u32, mac: *const u8) -> i32;
+}
+
+// WiFi interface type for STA mode
+const WIFI_IF_STA: u32 = 0;
+const ESP_OK: i32 = 0;
+
 /// Create the WiFi driver (consumes the modem peripheral) and apply initial config.
 /// Does NOT start or connect — call `start_and_connect` for that.
 pub fn create_wifi(
@@ -42,6 +51,12 @@ fn apply_config(wifi: &mut BlockingWifi<EspWifi<'static>>, settings: &Settings) 
         ..Default::default()
     });
     wifi.set_configuration(&config)?;
+
+    // Apply MAC address spoofing if configured
+    if !settings.wifi_mac.is_empty() {
+        apply_mac_address(wifi, &settings.wifi_mac)?;
+    }
+
     Ok(())
 }
 
@@ -53,6 +68,49 @@ pub fn reconfigure(wifi: &mut BlockingWifi<EspWifi<'static>>, settings: &Setting
     apply_config(wifi, settings)
 }
 
+/// Apply a spoofed MAC address to the WiFi interface.
+/// Format: "AA:BB:CC:DD:EE:FF" (case-insensitive)
+fn apply_mac_address(_wifi: &mut BlockingWifi<EspWifi<'static>>, mac_str: &str) -> Result<()> {
+    // Parse MAC address string "AA:BB:CC:DD:EE:FF"
+    let mac_bytes = parse_mac_address(mac_str)?;
+
+    // Use unsafe block to call ESP-IDF C API for setting MAC address
+    // This must be done before WiFi starts
+    unsafe {
+        let ret = esp_wifi_set_mac(WIFI_IF_STA, mac_bytes.as_ptr());
+        ensure!(
+            ret == ESP_OK,
+            "esp_wifi_set_mac failed with error code: {}",
+            ret
+        );
+    }
+
+    info!(
+        "WiFi MAC address set to: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        mac_bytes[0], mac_bytes[1], mac_bytes[2], mac_bytes[3], mac_bytes[4], mac_bytes[5]
+    );
+    Ok(())
+}
+
+/// Parse a MAC address string in format "AA:BB:CC:DD:EE:FF" (case-insensitive)
+fn parse_mac_address(mac_str: &str) -> Result<[u8; 6]> {
+    let parts: Vec<&str> = mac_str.split(':').collect();
+    ensure!(
+        parts.len() == 6,
+        "Invalid MAC address format. Expected 6 octets separated by colons (e.g., 00:14:4F:00:00:01)"
+    );
+
+    let mut bytes = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        bytes[i] = u8::from_str_radix(part.trim(), 16).with_context(|| {
+            format!(
+                "Invalid MAC address octet '{}': must be 2 hex digits",
+                part
+            )
+        })?;
+    }
+    Ok(bytes)
+}
 /// Map the config string to an ESP-IDF AuthMethod.
 ///
 /// Valid values: "wpa2", "wpa3", "wpa2wpa3", "open", or "" (auto).

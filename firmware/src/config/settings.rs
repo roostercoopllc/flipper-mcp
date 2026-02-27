@@ -12,6 +12,10 @@ pub struct Settings {
     /// WiFi auth method: "wpa2", "wpa3", "wpa2wpa3", "open".
     /// Empty string = auto-detect (WPA2 if password set, open otherwise).
     pub wifi_auth: String,
+    /// Optional MAC address spoofing. Format: "AA:BB:CC:DD:EE:FF"
+    /// Empty string = use hardware default.
+    /// Useful for impersonating server hardware during penetration testing.
+    pub wifi_mac: String,
 }
 
 impl Default for Settings {
@@ -23,6 +27,7 @@ impl Default for Settings {
             device_name: "flipper-mcp".to_string(),
             relay_url: String::new(),
             wifi_auth: String::new(),
+            wifi_mac: String::new(),
         }
     }
 }
@@ -57,6 +62,10 @@ impl Settings {
                     "wifi_auth" | "auth" => {
                         self.wifi_auth = value.trim().to_lowercase();
                         info!("FAP config: wifi_auth = {}", self.wifi_auth);
+                    }
+                    "wifi_mac" | "mac" => {
+                        self.wifi_mac = value.trim().to_uppercase();
+                        info!("FAP config: wifi_mac = {}", self.wifi_mac);
                     }
                     _ => {
                         warn!("FAP config: unknown key: {}", key);
