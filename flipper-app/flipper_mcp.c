@@ -76,6 +76,9 @@
 #include <subghz/environment.h>
 #include <subghz/subghz_protocol_registry.h>
 #include <subghz/subghz_file_encoder_worker.h>
+#include <subghz/subghz_tx_rx_worker.h>
+
+#include "../shared/c2_protocol.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -183,6 +186,15 @@ typedef struct {
     /* BLE HID profile state (NULL when not active) */
     FuriHalBleProfileBase* ble_hid_profile;
     Bt* bt_held;  /* BT service handle, held open during HID session */
+
+    /* C2 SubGHz radio state */
+    SubGhzTxRxWorker* c2_worker;     /* SubGHz raw byte pipe (NULL when inactive) */
+    bool              c2_active;      /* true when radio is started */
+    uint8_t           c2_seq;         /* next outgoing sequence number */
+    uint32_t          c2_frequency;   /* current frequency (Hz) */
+    char              c2_result[512]; /* last received result from client */
+    volatile bool     c2_result_ready;/* set true when RESULT/ERROR/PONG received */
+    FuriMutex*        c2_mutex;       /* protects c2_result and c2_result_ready */
 } FlipperMcpApp;
 
 /* Forward declarations for functions used before their definition */
@@ -1643,6 +1655,347 @@ static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, siz
     UNUSED(app);
 }
 
+// -- C2 SubGHz radio management -----------------------------------------------
+
+/** Callback invoked by SubGhzTxRxWorker when data is available to read. */
+static void c2_rx_callback(SubGhzTxRxWorker* instance, void* context) {
+    FlipperMcpApp* app = (FlipperMcpApp*)context;
+
+    uint8_t rx_buf[C2_MAX_FRAME_SIZE];
+    size_t avail = subghz_tx_rx_worker_available(instance);
+    if(avail == 0) return;
+    if(avail > sizeof(rx_buf)) avail = sizeof(rx_buf);
+
+    size_t read = subghz_tx_rx_worker_read(instance, rx_buf, avail);
+    if(read < C2_MIN_FRAME_SIZE) return;
+
+    uint8_t cmd, seq, flags, payload_len;
+    const uint8_t* payload;
+
+    if(!c2_parse_frame(rx_buf, read, &cmd, &seq, &flags, &payload, &payload_len)) {
+        FURI_LOG_W(TAG, "C2 RX: invalid frame (%zu bytes)", read);
+        return;
+    }
+
+    FURI_LOG_I(TAG, "C2 RX: cmd=%s seq=%u len=%u", c2_cmd_name(cmd), seq, payload_len);
+
+    /* Send ACK if requested */
+    if(flags & C2_FLAG_ACK_REQ) {
+        uint8_t ack_buf[C2_MAX_FRAME_SIZE];
+        size_t ack_len = c2_build_ack(ack_buf, seq);
+        subghz_tx_rx_worker_write(instance, ack_buf, ack_len);
+    }
+
+    /* Store result for commands that produce responses */
+    if(cmd == C2_CMD_PONG || cmd == C2_CMD_RESULT || cmd == C2_CMD_ERROR ||
+       cmd == C2_CMD_ACK || cmd == C2_CMD_STATUS) {
+        furi_mutex_acquire(app->c2_mutex, FuriWaitForever);
+        if(payload_len > 0 && payload != NULL) {
+            size_t copy_len = payload_len;
+            if(copy_len >= sizeof(app->c2_result)) copy_len = sizeof(app->c2_result) - 1;
+            memcpy(app->c2_result, payload, copy_len);
+            app->c2_result[copy_len] = '\0';
+        } else {
+            snprintf(app->c2_result, sizeof(app->c2_result), "%s", c2_cmd_name(cmd));
+        }
+        app->c2_result_ready = true;
+        furi_mutex_release(app->c2_mutex);
+    }
+}
+
+/** Start the C2 SubGHz radio on the configured frequency. */
+static bool c2_start_radio(FlipperMcpApp* app, char* result, size_t result_size) {
+    if(app->c2_active) {
+        snprintf(result, result_size, "C2 radio already active at %lu Hz", app->c2_frequency);
+        return true;
+    }
+
+    subghz_devices_init();
+    const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
+    if(!device || !subghz_devices_begin(device)) {
+        snprintf(result, result_size, "C2: Failed to init CC1101");
+        subghz_devices_deinit();
+        return false;
+    }
+
+    if(!subghz_devices_is_frequency_valid(device, app->c2_frequency)) {
+        snprintf(result, result_size, "C2: Invalid frequency %lu Hz", app->c2_frequency);
+        subghz_devices_end(device);
+        subghz_devices_deinit();
+        return false;
+    }
+
+    app->c2_worker = subghz_tx_rx_worker_alloc();
+    if(!subghz_tx_rx_worker_start(app->c2_worker, device, app->c2_frequency)) {
+        snprintf(result, result_size, "C2: Failed to start TxRx worker");
+        subghz_tx_rx_worker_free(app->c2_worker);
+        app->c2_worker = NULL;
+        subghz_devices_end(device);
+        subghz_devices_deinit();
+        return false;
+    }
+
+    subghz_tx_rx_worker_set_callback_have_read(app->c2_worker, c2_rx_callback, app);
+
+    app->c2_active = true;
+    app->c2_seq = 0;
+    app->c2_result_ready = false;
+    app->c2_result[0] = '\0';
+
+    snprintf(result, result_size, "C2 radio started at %lu Hz", app->c2_frequency);
+    FURI_LOG_I(TAG, "C2 radio started at %lu Hz", app->c2_frequency);
+    return true;
+}
+
+/** Stop the C2 SubGHz radio. */
+static bool c2_stop_radio(FlipperMcpApp* app, char* result, size_t result_size) {
+    if(!app->c2_active || !app->c2_worker) {
+        snprintf(result, result_size, "C2 radio not active");
+        return true;
+    }
+
+    if(subghz_tx_rx_worker_is_running(app->c2_worker)) {
+        subghz_tx_rx_worker_stop(app->c2_worker);
+    }
+    subghz_tx_rx_worker_free(app->c2_worker);
+    app->c2_worker = NULL;
+    app->c2_active = false;
+
+    subghz_devices_deinit();
+
+    snprintf(result, result_size, "C2 radio stopped");
+    FURI_LOG_I(TAG, "C2 radio stopped");
+    return true;
+}
+
+/** Send a C2 frame and optionally wait for a response. */
+static bool c2_send_and_wait(
+    FlipperMcpApp* app,
+    uint8_t cmd,
+    const uint8_t* payload,
+    uint8_t payload_len,
+    uint32_t timeout_ms,
+    char* result,
+    size_t result_size) {
+    if(!app->c2_active || !app->c2_worker) {
+        snprintf(result, result_size, "C2 radio not active. Call c2_configure start first.");
+        return false;
+    }
+
+    uint8_t frame_buf[C2_MAX_FRAME_SIZE];
+    uint8_t seq = app->c2_seq++;
+    size_t frame_len =
+        c2_build_frame(frame_buf, cmd, seq, C2_FLAG_ACK_REQ, payload, payload_len);
+    if(frame_len == 0) {
+        snprintf(result, result_size, "C2: Failed to build frame (payload too large?)");
+        return false;
+    }
+
+    /* Clear previous result */
+    furi_mutex_acquire(app->c2_mutex, FuriWaitForever);
+    app->c2_result_ready = false;
+    app->c2_result[0] = '\0';
+    furi_mutex_release(app->c2_mutex);
+
+    /* Send with retries */
+    bool got_response = false;
+    for(int attempt = 0; attempt < C2_MAX_RETRIES && !got_response; attempt++) {
+        if(!subghz_tx_rx_worker_write(app->c2_worker, frame_buf, frame_len)) {
+            FURI_LOG_W(TAG, "C2 TX write failed (attempt %d)", attempt + 1);
+            furi_delay_ms(100);
+            continue;
+        }
+
+        FURI_LOG_I(
+            TAG,
+            "C2 TX: cmd=%s seq=%u len=%u (attempt %d)",
+            c2_cmd_name(cmd),
+            seq,
+            payload_len,
+            attempt + 1);
+
+        /* Wait for response */
+        uint32_t start = furi_get_tick();
+        uint32_t wait = (attempt == 0) ? timeout_ms : C2_ACK_TIMEOUT_MS;
+        while(furi_get_tick() - start < wait) {
+            furi_mutex_acquire(app->c2_mutex, FuriWaitForever);
+            got_response = app->c2_result_ready;
+            furi_mutex_release(app->c2_mutex);
+            if(got_response) break;
+            furi_delay_ms(50);
+        }
+    }
+
+    if(got_response) {
+        furi_mutex_acquire(app->c2_mutex, FuriWaitForever);
+        snprintf(result, result_size, "%s", app->c2_result);
+        furi_mutex_release(app->c2_mutex);
+        return true;
+    } else {
+        snprintf(
+            result,
+            result_size,
+            "C2: No response from client (cmd=%s, %d retries, %lums timeout)",
+            c2_cmd_name(cmd),
+            C2_MAX_RETRIES,
+            timeout_ms);
+        return false;
+    }
+}
+
+/** Map a command name string to C2 command byte. */
+static uint8_t c2_cmd_from_name(const char* name) {
+    if(strcmp(name, "ble_hid_start") == 0) return C2_CMD_BLE_HID_START;
+    if(strcmp(name, "ble_hid_type") == 0) return C2_CMD_BLE_HID_TYPE;
+    if(strcmp(name, "ble_hid_press") == 0) return C2_CMD_BLE_HID_PRESS;
+    if(strcmp(name, "ble_hid_mouse") == 0) return C2_CMD_BLE_HID_MOUSE;
+    if(strcmp(name, "ble_hid_stop") == 0) return C2_CMD_BLE_HID_STOP;
+    if(strcmp(name, "ble_beacon_start") == 0) return C2_CMD_BLE_BEACON_START;
+    if(strcmp(name, "ble_beacon_stop") == 0) return C2_CMD_BLE_BEACON_STOP;
+    return 0;
+}
+
+/** Handle "c2 <subcommand>" CLI commands from the ESP32. */
+static bool cmd_c2(FlipperMcpApp* app, const char* subcmd, char* result, size_t result_size) {
+    if(strncmp(subcmd, "configure ", 10) == 0) {
+        /* c2 configure <start|stop|set_freq> [frequency] */
+        char action[16] = {0};
+        uint32_t freq = C2_FREQ_DEFAULT;
+        sscanf(subcmd + 10, "%15s %lu", action, &freq);
+
+        if(strcmp(action, "start") == 0) {
+            if(freq > 0) app->c2_frequency = freq;
+            return c2_start_radio(app, result, result_size);
+        } else if(strcmp(action, "stop") == 0) {
+            return c2_stop_radio(app, result, result_size);
+        } else if(strcmp(action, "set_freq") == 0) {
+            app->c2_frequency = freq;
+            snprintf(result, result_size, "C2 frequency set to %lu Hz", freq);
+            return true;
+        } else {
+            snprintf(
+                result, result_size, "Unknown c2 configure action: %s (use start/stop/set_freq)",
+                action);
+            return false;
+        }
+
+    } else if(strcmp(subcmd, "ping") == 0) {
+        /* c2 ping — send PING, wait for PONG */
+        return c2_send_and_wait(app, C2_CMD_PING, NULL, 0, 3000, result, result_size);
+
+    } else if(strcmp(subcmd, "status") == 0) {
+        /* c2 status — report local radio state */
+        snprintf(
+            result,
+            result_size,
+            "c2_active: %s\nc2_frequency: %lu Hz\nc2_seq: %u\nc2_last_result: %.100s",
+            app->c2_active ? "yes" : "no",
+            app->c2_frequency,
+            app->c2_seq,
+            app->c2_result);
+        return true;
+
+    } else if(strncmp(subcmd, "send ", 5) == 0) {
+        /* c2 send <cmd_name> <payload> [timeout_ms] */
+        char cmd_name[32] = {0};
+        char payload_str[256] = {0};
+        uint32_t timeout_ms = 5000;
+
+        /* Parse: first token is command name, rest is payload, last might be timeout */
+        const char* p = subcmd + 5;
+        sscanf(p, "%31s", cmd_name);
+
+        uint8_t cmd_byte = c2_cmd_from_name(cmd_name);
+        if(cmd_byte == 0) {
+            snprintf(
+                result,
+                result_size,
+                "Unknown C2 command: %s\n"
+                "Valid: ble_hid_start, ble_hid_type, ble_hid_press, ble_hid_mouse, "
+                "ble_hid_stop, ble_beacon_start, ble_beacon_stop",
+                cmd_name);
+            return false;
+        }
+
+        /* Skip past command name to get payload */
+        p += strlen(cmd_name);
+        while(*p == ' ') p++;
+
+        /* Check if last token is a number (timeout) */
+        size_t payload_len = 0;
+        if(*p) {
+            /* Copy remaining string as payload */
+            strncpy(payload_str, p, sizeof(payload_str) - 1);
+            payload_len = strlen(payload_str);
+
+            /* Try to parse timeout from the end */
+            char* last_space = strrchr(payload_str, ' ');
+            if(last_space) {
+                uint32_t maybe_timeout = (uint32_t)atoi(last_space + 1);
+                if(maybe_timeout >= 500 && maybe_timeout <= 30000) {
+                    timeout_ms = maybe_timeout;
+                    *last_space = '\0';
+                    payload_len = strlen(payload_str);
+                }
+            }
+        }
+
+        return c2_send_and_wait(
+            app,
+            cmd_byte,
+            (const uint8_t*)payload_str,
+            (uint8_t)(payload_len > C2_MAX_PAYLOAD ? C2_MAX_PAYLOAD : payload_len),
+            timeout_ms,
+            result,
+            result_size);
+
+    } else if(strncmp(subcmd, "recv ", 5) == 0) {
+        /* c2 recv <timeout_ms> — wait for unsolicited message */
+        uint32_t timeout_ms = 5000;
+        sscanf(subcmd + 5, "%lu", &timeout_ms);
+        if(timeout_ms > 30000) timeout_ms = 30000;
+        if(timeout_ms < 500) timeout_ms = 500;
+
+        if(!app->c2_active) {
+            snprintf(result, result_size, "C2 radio not active");
+            return false;
+        }
+
+        /* Clear and wait */
+        furi_mutex_acquire(app->c2_mutex, FuriWaitForever);
+        app->c2_result_ready = false;
+        furi_mutex_release(app->c2_mutex);
+
+        uint32_t start = furi_get_tick();
+        bool got = false;
+        while(furi_get_tick() - start < timeout_ms) {
+            furi_mutex_acquire(app->c2_mutex, FuriWaitForever);
+            got = app->c2_result_ready;
+            furi_mutex_release(app->c2_mutex);
+            if(got) break;
+            furi_delay_ms(50);
+        }
+
+        if(got) {
+            furi_mutex_acquire(app->c2_mutex, FuriWaitForever);
+            snprintf(result, result_size, "%s", app->c2_result);
+            furi_mutex_release(app->c2_mutex);
+            return true;
+        } else {
+            snprintf(result, result_size, "C2: No message received within %lums", timeout_ms);
+            return false;
+        }
+
+    } else {
+        snprintf(
+            result,
+            result_size,
+            "Unknown c2 command: %.40s\nValid: configure, ping, status, send, recv",
+            subcmd);
+        return false;
+    }
+}
+
 // -- CLI relay: dispatcher ----------------------------------------------------
 
 /** Handle a CLI command from ESP32. Executes the command and sends CLI_OK or CLI_ERR. */
@@ -1683,6 +2036,8 @@ static void cli_dispatch(FlipperMcpApp* app, const char* command) {
         ok = cmd_nfc(app, command + 4, result, sizeof(result));
     } else if(strncmp(command, "subghz ", 7) == 0) {
         ok = cmd_subghz(app, command + 7, result, sizeof(result));
+    } else if(strncmp(command, "c2 ", 3) == 0) {
+        ok = cmd_c2(app, command + 3, result, sizeof(result));
     } else if(strcmp(command, "free") == 0) {
         ok = cmd_free(result, sizeof(result));
     } else if(strcmp(command, "uptime") == 0) {
@@ -2676,6 +3031,10 @@ int32_t flipper_mcp_app(void* p) {
     /* Initialize logging defaults */
     app->log_to_sd = true;  /* enabled by default */
     app->log_level = 1;     /* 0=errors, 1=normal, 2=verbose */
+
+    /* Initialize C2 radio defaults */
+    app->c2_frequency = C2_FREQ_DEFAULT;
+    app->c2_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     strncpy(
         app->log_file_path,
         "/ext/apps_data/flipper_mcp/logs.txt",
@@ -2742,6 +3101,15 @@ int32_t flipper_mcp_app(void* p) {
     /* Stop extra beacon if active */
     if(furi_hal_bt_extra_beacon_is_active()) {
         furi_hal_bt_extra_beacon_stop();
+    }
+
+    /* Stop C2 radio if active */
+    if(app->c2_active && app->c2_worker) {
+        char c2_buf[64];
+        c2_stop_radio(app, c2_buf, sizeof(c2_buf));
+    }
+    if(app->c2_mutex) {
+        furi_mutex_free(app->c2_mutex);
     }
 
     uart_cleanup(app);

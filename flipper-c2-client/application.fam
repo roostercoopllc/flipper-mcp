@@ -1,0 +1,12 @@
+App(
+    appid="flipper_c2_client",
+    name="C2 Client",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="c2_client_app",
+    requires=["gui", "bt"],
+    sources=["c2_client.c"],
+    fap_category="Tools",
+    fap_version=(1, 0),
+    fap_description="SubGHz C2 client — receives commands and executes BLE HID/beacon attacks. For authorized security research.",
+    fap_libs=["ble_profile"],
+)

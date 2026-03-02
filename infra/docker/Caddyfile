@@ -1,0 +1,3 @@
+{$RELAY_DOMAIN:localhost} {
+	reverse_proxy relay:9090
+}
