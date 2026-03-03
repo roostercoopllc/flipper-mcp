@@ -1,4 +1,5 @@
 mod ble;
+mod building_mgmt;
 mod c2;
 mod gpio;
 mod ibutton;
@@ -23,5 +24,6 @@ pub fn register_all() -> Vec<Box<dyn FlipperModule>> {
         Box::new(ibutton::IButtonModule),
         Box::new(ble::BleModule),
         Box::new(c2::C2Module),
+        Box::new(building_mgmt::BuildingMgmtModule),
     ]
 }

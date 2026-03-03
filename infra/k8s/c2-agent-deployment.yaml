@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: c2-agent
+  namespace: flipper-c2-demo
+  labels:
+    app: c2-agent
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: c2-agent
+    spec:
+      # hostNetwork gives the pod direct access to the host's LAN —
+      # required to reach Flipper-A (192.168.0.58) and remote Ollama.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      restartPolicy: Never
+
+      containers:
+        - name: c2-agent
+          image: flipper-c2-agent:latest
+          imagePullPolicy: Never   # image loaded locally via: minikube image load
+
+          command: ["python", "demo_scenario.py"]
+          args:
+            - "--mock"             # change to --live when Flipper-A is connected
+
+          envFrom:
+            - configMapRef:
+                name: c2-agent-config
+
+          volumeMounts:
+            - name: output
+              mountPath: /output
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+      volumes:
+        - name: output
+          emptyDir: {}
+
+      # Keep the pod around after completion so we can kubectl cp the output
+      # (ttlSecondsAfterFinished on the Job cleans it up after 5 min)

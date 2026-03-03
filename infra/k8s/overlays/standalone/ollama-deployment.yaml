@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: flipper-c2-demo
+  labels:
+    app: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      # Pull the model on first start
+      initContainers:
+        - name: pull-model
+          image: ollama/ollama:latest
+          command: ["sh", "-c", "ollama serve & sleep 5 && ollama pull llama3.2 && kill %1"]
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0"
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              memory: "4Gi"
+            limits:
+              memory: "8Gi"
+
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0"
+          ports:
+            - containerPort: 11434
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+
+      volumes:
+        - name: ollama-data
+          emptyDir: {}

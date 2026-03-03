@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: c2-agent-config
+  namespace: flipper-c2-demo
+data:
+  # Override: point to the in-cluster Ollama service instead of remote server
+  OLLAMA_URL: "http://ollama:11434"

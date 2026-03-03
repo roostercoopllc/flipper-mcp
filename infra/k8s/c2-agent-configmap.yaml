@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: c2-agent-config
+  namespace: flipper-c2-demo
+data:
+  # Flipper-A: the WiFi-connected C2 relay running flipper-mcp
+  FLIPPER_HOST: "192.168.0.58"
+  FLIPPER_PORT: "8080"
+
+  # Ollama: remote server (override in overlays/standalone/ for in-cluster)
+  OLLAMA_URL: "http://192.168.0.167:11434"
+  OLLAMA_MODEL: "llama3.2"
+
+  # Demo mode: "mock" (no hardware) or "live" (real Flipper)
+  DEMO_MODE: "mock"
+
+  # Output path inside the container
+  OUTPUT_DIR: "/output"

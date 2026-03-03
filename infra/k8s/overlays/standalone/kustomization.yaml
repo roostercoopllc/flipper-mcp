@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Standalone overlay: includes in-cluster Ollama so no external server is needed.
+# Deploy with: kubectl apply -k infra/k8s/overlays/standalone/
+
+resources:
+  - ../../           # base manifests (namespace, configmap, c2-agent job)
+  - ollama-deployment.yaml
+  - ollama-service.yaml
+
+patchesStrategicMerge:
+  - configmap-patch.yaml   # overrides OLLAMA_URL → http://ollama:11434
