@@ -1409,7 +1409,7 @@ static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, siz
 
         subghz_devices_init();
         const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
-        if(!device || !subghz_devices_begin(device)) {
+        if(!device) {
             snprintf(result, result_size, "Failed to init CC1101");
             subghz_devices_deinit();
             subghz_environment_free(env);
@@ -1458,7 +1458,7 @@ static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, siz
 
         subghz_devices_init();
         const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
-        if(!device || !subghz_devices_begin(device)) {
+        if(!device) {
             snprintf(result, result_size, "Failed to init CC1101");
             subghz_devices_deinit();
             return false;
@@ -1466,7 +1466,6 @@ static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, siz
 
         if(!subghz_devices_is_frequency_valid(device, frequency)) {
             snprintf(result, result_size, "Invalid frequency: %lu", frequency);
-            subghz_devices_end(device);
             subghz_devices_deinit();
             return false;
         }
@@ -1582,7 +1581,7 @@ static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, siz
 
         subghz_devices_init();
         const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
-        if(!device || !subghz_devices_begin(device)) {
+        if(!device) {
             snprintf(result, result_size, "Failed to init CC1101");
             subghz_devices_deinit();
             return false;
@@ -1590,7 +1589,6 @@ static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, siz
 
         if(!subghz_devices_is_frequency_valid(device, frequency)) {
             snprintf(result, result_size, "Invalid frequency: %lu", frequency);
-            subghz_devices_end(device);
             subghz_devices_deinit();
             return false;
         }
@@ -1657,16 +1655,17 @@ static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, siz
 
 // -- C2 SubGHz radio management -----------------------------------------------
 
-/** Callback invoked by SubGhzTxRxWorker when data is available to read. */
-static void c2_rx_callback(SubGhzTxRxWorker* instance, void* context) {
+/** Callback invoked by SubGhzTxRxWorker when data is available to read.
+ *  SDK signature: void (*)(void* context) — worker accessed via app struct. */
+static void c2_rx_callback(void* context) {
     FlipperMcpApp* app = (FlipperMcpApp*)context;
 
     uint8_t rx_buf[C2_MAX_FRAME_SIZE];
-    size_t avail = subghz_tx_rx_worker_available(instance);
+    size_t avail = subghz_tx_rx_worker_available(app->c2_worker);
     if(avail == 0) return;
     if(avail > sizeof(rx_buf)) avail = sizeof(rx_buf);
 
-    size_t read = subghz_tx_rx_worker_read(instance, rx_buf, avail);
+    size_t read = subghz_tx_rx_worker_read(app->c2_worker, rx_buf, avail);
     if(read < C2_MIN_FRAME_SIZE) return;
 
     uint8_t cmd, seq, flags, payload_len;
@@ -1683,7 +1682,7 @@ static void c2_rx_callback(SubGhzTxRxWorker* instance, void* context) {
     if(flags & C2_FLAG_ACK_REQ) {
         uint8_t ack_buf[C2_MAX_FRAME_SIZE];
         size_t ack_len = c2_build_ack(ack_buf, seq);
-        subghz_tx_rx_worker_write(instance, ack_buf, ack_len);
+        subghz_tx_rx_worker_write(app->c2_worker, ack_buf, ack_len);
     }
 
     /* Store result for commands that produce responses */
@@ -1710,27 +1709,27 @@ static bool c2_start_radio(FlipperMcpApp* app, char* result, size_t result_size)
         return true;
     }
 
+    /* NOTE: The internal CC1101's begin() vtable entry is NULL — do NOT call
+     * subghz_devices_begin() for SUBGHZ_DEVICE_CC1101_INT_NAME. */
     subghz_devices_init();
     const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
-    if(!device || !subghz_devices_begin(device)) {
-        snprintf(result, result_size, "C2: Failed to init CC1101");
+    if(!device) {
+        snprintf(result, result_size, "C2: CC1101 device not found");
         subghz_devices_deinit();
         return false;
     }
 
     if(!subghz_devices_is_frequency_valid(device, app->c2_frequency)) {
         snprintf(result, result_size, "C2: Invalid frequency %lu Hz", app->c2_frequency);
-        subghz_devices_end(device);
         subghz_devices_deinit();
         return false;
     }
 
     app->c2_worker = subghz_tx_rx_worker_alloc();
     if(!subghz_tx_rx_worker_start(app->c2_worker, device, app->c2_frequency)) {
-        snprintf(result, result_size, "C2: Failed to start TxRx worker");
+        snprintf(result, result_size, "C2: Worker start failed (freq blocked by region?)");
         subghz_tx_rx_worker_free(app->c2_worker);
         app->c2_worker = NULL;
-        subghz_devices_end(device);
         subghz_devices_deinit();
         return false;
     }

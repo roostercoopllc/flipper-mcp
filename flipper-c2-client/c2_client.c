@@ -38,14 +38,17 @@
 
 #define TAG "C2Client"
 
-#define EXTRA_BEACON_MAX_DATA_SIZE 31
-#define EXTRA_BEACON_MAC_ADDR_SIZE 6
+/* EXTRA_BEACON_MAX_DATA_SIZE and EXTRA_BEACON_MAC_ADDR_SIZE already defined in extra_beacon.h */
 
 /* ---------- View IDs ---------------------------------------------------- */
 
 typedef enum {
     ViewIdStatus = 0,
 } ViewId;
+
+typedef enum {
+    CustomEventRefresh = 0,
+} CustomEvent;
 
 /* ---------- App state --------------------------------------------------- */
 
@@ -68,11 +71,9 @@ typedef struct {
     bool beacon_active;
 
     /* Status display */
-    char status_line1[64];
-    char status_line2[64];
-    char status_line3[64];
-    char status_line4[64];
     char last_cmd[32];
+    char error_msg[64];
+    FuriTimer* refresh_timer;
     volatile bool running;
 } C2ClientApp;
 
@@ -187,6 +188,7 @@ static uint16_t lookup_modifier(const char* name) {
     return 0;
 }
 
+static int hex_to_bytes(const char* hex, uint8_t* out, size_t max_len) __attribute__((unused));
 static int hex_to_bytes(const char* hex, uint8_t* out, size_t max_len) {
     size_t hex_len = strlen(hex);
     if(hex_len % 2 != 0) return -1;
@@ -254,6 +256,7 @@ static void handle_ble_hid_start(C2ClientApp* app, const uint8_t* payload, uint8
     snprintf(result, sizeof(result), "HID started as '%s'", name);
     send_response(app, C2_CMD_RESULT, result);
     snprintf(app->last_cmd, sizeof(app->last_cmd), "HID: %s", name);
+    FURI_LOG_I(TAG, "BLE HID started as '%s'", name);
 }
 
 static void handle_ble_hid_type(C2ClientApp* app, const uint8_t* payload, uint8_t len) {
@@ -297,6 +300,7 @@ static void handle_ble_hid_type(C2ClientApp* app, const uint8_t* payload, uint8_
     snprintf(result, sizeof(result), "Typed %zu chars", typed);
     send_response(app, C2_CMD_RESULT, result);
     snprintf(app->last_cmd, sizeof(app->last_cmd), "TYPE: %zu ch", typed);
+    FURI_LOG_I(TAG, "HID type: %zu chars sent", typed);
 }
 
 static void handle_ble_hid_press(C2ClientApp* app, const uint8_t* payload, uint8_t len) {
@@ -359,9 +363,10 @@ static void handle_ble_hid_press(C2ClientApp* app, const uint8_t* payload, uint8
     }
 
     char result[64];
-    snprintf(result, sizeof(result), "Key pressed: %s", combo);
+    snprintf(result, sizeof(result), "Key pressed: %.49s", combo);
     send_response(app, C2_CMD_RESULT, result);
-    snprintf(app->last_cmd, sizeof(app->last_cmd), "KEY: %s", combo);
+    snprintf(app->last_cmd, sizeof(app->last_cmd), "KEY: %.26s", combo);
+    FURI_LOG_I(TAG, "HID key press: %s", combo);
 }
 
 static void handle_ble_hid_mouse(C2ClientApp* app, const uint8_t* payload, uint8_t len) {
@@ -405,6 +410,7 @@ static void handle_ble_hid_mouse(C2ClientApp* app, const uint8_t* payload, uint8
 
     send_response(app, C2_CMD_RESULT, "Mouse OK");
     snprintf(app->last_cmd, sizeof(app->last_cmd), "MOUSE: %d,%d", dx, dy);
+    FURI_LOG_I(TAG, "HID mouse: dx=%d dy=%d btn=%u action=%u scroll=%d", dx, dy, button, action, (int)scroll);
 }
 
 static void handle_ble_hid_stop(C2ClientApp* app) {
@@ -425,6 +431,7 @@ static void handle_ble_hid_stop(C2ClientApp* app) {
 
     send_response(app, C2_CMD_RESULT, "HID stopped");
     snprintf(app->last_cmd, sizeof(app->last_cmd), "HID stopped");
+    FURI_LOG_I(TAG, "BLE HID stopped");
 }
 
 /* ---------- BLE Beacon command handlers --------------------------------- */
@@ -491,6 +498,8 @@ static void handle_ble_beacon_start(C2ClientApp* app, const uint8_t* payload, ui
     snprintf(result, sizeof(result), "Beacon started: %d bytes, %dms interval", adv_len, interval);
     send_response(app, C2_CMD_RESULT, result);
     snprintf(app->last_cmd, sizeof(app->last_cmd), "BEACON: %dB", adv_len);
+    FURI_LOG_I(TAG, "BLE beacon started: %d bytes adv data, %d ms interval, custom_mac=%d",
+               adv_len, interval, custom_mac);
 }
 
 static void handle_ble_beacon_stop(C2ClientApp* app) {
@@ -500,6 +509,7 @@ static void handle_ble_beacon_stop(C2ClientApp* app) {
     app->beacon_active = false;
     send_response(app, C2_CMD_RESULT, "Beacon stopped");
     snprintf(app->last_cmd, sizeof(app->last_cmd), "BEACON off");
+    FURI_LOG_I(TAG, "BLE beacon stopped");
 }
 
 /* ---------- Status report ----------------------------------------------- */
@@ -516,6 +526,10 @@ static void handle_status_request(C2ClientApp* app) {
         app->rx_count,
         app->tx_count);
     send_response(app, C2_CMD_STATUS, status);
+    FURI_LOG_I(TAG, "Status sent: hid=%s beacon=%s rx=%lu tx=%lu",
+               app->ble_hid_profile ? "active" : "inactive",
+               app->beacon_active ? "active" : "inactive",
+               app->rx_count, app->tx_count);
 }
 
 /* ---------- C2 frame dispatch ------------------------------------------- */
@@ -582,19 +596,35 @@ static void process_c2_frame(C2ClientApp* app, const uint8_t* buf, size_t len) {
 
 /* ---------- SubGHz RX callback ------------------------------------------ */
 
-static void c2_rx_callback(SubGhzTxRxWorker* instance, void* context) {
+/* SDK signature: void (*)(void* context) — worker accessed via app struct */
+static void c2_rx_callback(void* context) {
     C2ClientApp* app = (C2ClientApp*)context;
 
     uint8_t rx_buf[C2_MAX_FRAME_SIZE];
-    while(subghz_tx_rx_worker_available(instance) >= C2_MIN_FRAME_SIZE) {
-        size_t avail = subghz_tx_rx_worker_available(instance);
+    while(subghz_tx_rx_worker_available(app->worker) >= C2_MIN_FRAME_SIZE) {
+        size_t avail = subghz_tx_rx_worker_available(app->worker);
         if(avail > sizeof(rx_buf)) avail = sizeof(rx_buf);
 
-        size_t read = subghz_tx_rx_worker_read(instance, rx_buf, avail);
+        size_t read = subghz_tx_rx_worker_read(app->worker, rx_buf, avail);
         if(read >= C2_MIN_FRAME_SIZE) {
             process_c2_frame(app, rx_buf, read);
         }
     }
+}
+
+/* ---------- Periodic refresh -------------------------------------------- */
+
+static void refresh_timer_cb(void* context) {
+    C2ClientApp* app = (C2ClientApp*)context;
+    view_dispatcher_send_custom_event(app->view_dispatcher, CustomEventRefresh);
+}
+
+static bool custom_event_cb(void* context, uint32_t event) {
+    C2ClientApp* app = (C2ClientApp*)context;
+    UNUSED(event);
+    /* Commit model with update=true to force a redraw */
+    with_view_model(app->status_view, C2ClientApp** model, { UNUSED(model); }, true);
+    return true;
 }
 
 /* ---------- GUI callbacks ----------------------------------------------- */
@@ -604,35 +634,59 @@ static void draw_status(Canvas* canvas, void* model) {
     C2ClientApp* app = *app_ptr;
 
     canvas_clear(canvas);
+
+    /* ---- Header bar (filled rect, white text) -------------------------- */
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_box(canvas, 0, 0, 128, 13);
+    canvas_set_color(canvas, ColorWhite);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "C2 Client");
+    canvas_draw_str(canvas, 2, 11, "C2 Client");
+    /* Radio activity indicator: filled disc = active, outline = off/error */
+    if(app->radio_active) {
+        canvas_draw_disc(canvas, 121, 6, 4);
+    } else {
+        canvas_draw_circle(canvas, 121, 6, 4);
+    }
+    canvas_set_color(canvas, ColorBlack);
+
+    /* ---- Separator line ----------------------------------------------- */
+    canvas_draw_line(canvas, 0, 13, 127, 13);
 
     canvas_set_font(canvas, FontSecondary);
 
-    snprintf(
-        app->status_line1, sizeof(app->status_line1),
-        "Radio: %s  %.3f MHz",
-        app->radio_active ? "ON" : "OFF",
-        app->frequency / 1000000.0);
-    canvas_draw_str(canvas, 2, 24, app->status_line1);
+    /* ---- Error mode: show message and exit hint ----------------------- */
+    if(app->error_msg[0]) {
+        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignCenter, app->error_msg);
+        canvas_draw_str_aligned(canvas, 64, 56, AlignCenter, AlignCenter, "Back = exit");
+        return;
+    }
 
-    snprintf(
-        app->status_line2, sizeof(app->status_line2),
-        "RX: %lu  TX: %lu",
-        app->rx_count, app->tx_count);
-    canvas_draw_str(canvas, 2, 36, app->status_line2);
+    /* ---- Status lines (9 px spacing) ---------------------------------- */
+    char line[48];
 
+    /* Line 1: frequency */
     snprintf(
-        app->status_line3, sizeof(app->status_line3),
+        line, sizeof(line),
+        "RF: %lu.%03lu MHz",
+        (unsigned long)(app->frequency / 1000000UL),
+        (unsigned long)((app->frequency % 1000000UL) / 1000UL));
+    canvas_draw_str(canvas, 2, 24, line);
+
+    /* Line 2: RX / TX counters */
+    snprintf(line, sizeof(line), "RX: %lu  TX: %lu", app->rx_count, app->tx_count);
+    canvas_draw_str(canvas, 2, 34, line);
+
+    /* Line 3: HID and beacon state */
+    snprintf(
+        line, sizeof(line),
         "HID: %s  BCN: %s",
-        app->ble_hid_profile ? "ON" : "off",
-        app->beacon_active ? "ON" : "off");
-    canvas_draw_str(canvas, 2, 48, app->status_line3);
+        app->ble_hid_profile ? "ON " : "off",
+        app->beacon_active ? "ON " : "off");
+    canvas_draw_str(canvas, 2, 44, line);
 
-    snprintf(
-        app->status_line4, sizeof(app->status_line4),
-        "Last: %s", app->last_cmd[0] ? app->last_cmd : "(none)");
-    canvas_draw_str(canvas, 2, 60, app->status_line4);
+    /* Line 4: last command with arrow prefix */
+    snprintf(line, sizeof(line), "> %s", app->last_cmd[0] ? app->last_cmd : "Listening...");
+    canvas_draw_str(canvas, 2, 54, line);
 }
 
 static bool input_status(InputEvent* event, void* context) {
@@ -648,27 +702,34 @@ static bool input_status(InputEvent* event, void* context) {
 /* ---------- Radio lifecycle --------------------------------------------- */
 
 static bool start_radio(C2ClientApp* app) {
+    /* NOTE: The internal CC1101's begin() vtable entry is NULL (confirmed by
+     * firmware disassembly) — do NOT call subghz_devices_begin() for
+     * SUBGHZ_DEVICE_CC1101_INT_NAME.  The TxRx worker manages the radio
+     * lifecycle internally via its worker thread. */
     subghz_devices_init();
     const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
-    if(!device || !subghz_devices_begin(device)) {
-        FURI_LOG_E(TAG, "Failed to init CC1101");
+    if(!device) {
+        FURI_LOG_E(TAG, "CC1101 device not found");
+        snprintf(app->error_msg, sizeof(app->error_msg), "CC1101 not found");
         subghz_devices_deinit();
         return false;
     }
 
     if(!subghz_devices_is_frequency_valid(device, app->frequency)) {
-        FURI_LOG_E(TAG, "Invalid frequency: %lu", app->frequency);
-        subghz_devices_end(device);
+        FURI_LOG_E(TAG, "Invalid frequency: %lu Hz", app->frequency);
+        snprintf(app->error_msg, sizeof(app->error_msg), "Invalid freq: %lu Hz", app->frequency);
         subghz_devices_deinit();
         return false;
     }
 
     app->worker = subghz_tx_rx_worker_alloc();
+    /* subghz_tx_rx_worker_start returns false when the frequency is not
+     * permitted by the Flipper's configured region (furi_hal_region check). */
     if(!subghz_tx_rx_worker_start(app->worker, device, app->frequency)) {
-        FURI_LOG_E(TAG, "Failed to start TxRx worker");
+        FURI_LOG_E(TAG, "Worker start failed — freq blocked by region?");
+        snprintf(app->error_msg, sizeof(app->error_msg), "Freq blocked by region");
         subghz_tx_rx_worker_free(app->worker);
         app->worker = NULL;
-        subghz_devices_end(device);
         subghz_devices_deinit();
         return false;
     }
@@ -676,7 +737,11 @@ static bool start_radio(C2ClientApp* app) {
     subghz_tx_rx_worker_set_callback_have_read(app->worker, c2_rx_callback, app);
     app->radio_active = true;
 
-    FURI_LOG_I(TAG, "Radio started at %lu Hz", app->frequency);
+    FURI_LOG_I(
+        TAG,
+        "Radio started at %lu.%03lu MHz",
+        (unsigned long)(app->frequency / 1000000UL),
+        (unsigned long)((app->frequency % 1000000UL) / 1000UL));
     return true;
 }
 
@@ -708,20 +773,10 @@ int32_t c2_client_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->notifications = furi_record_open(RECORD_NOTIFICATION);
 
-    /* Start SubGHz radio */
-    if(!start_radio(app)) {
-        FURI_LOG_E(TAG, "Failed to start radio, exiting");
-        furi_record_close(RECORD_GUI);
-        furi_record_close(RECORD_NOTIFICATION);
-        free(app);
-        return -1;
-    }
-
-    snprintf(app->last_cmd, sizeof(app->last_cmd), "Listening...");
-
-    /* Set up GUI */
+    /* Set up GUI first so radio errors are shown on-screen */
     app->view_dispatcher = view_dispatcher_alloc();
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
+    view_dispatcher_set_custom_event_callback(app->view_dispatcher, custom_event_cb);
     view_dispatcher_attach_to_gui(
         app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
 
@@ -735,10 +790,30 @@ int32_t c2_client_app(void* p) {
     view_dispatcher_add_view(app->view_dispatcher, ViewIdStatus, app->status_view);
     view_dispatcher_switch_to_view(app->view_dispatcher, ViewIdStatus);
 
+    /* Start SubGHz radio — start_radio() sets error_msg on failure so the
+     * screen shows a specific reason instead of silently exiting. */
+    if(!start_radio(app)) {
+        FURI_LOG_E(TAG, "Radio init failed (%s) — showing error screen", app->error_msg);
+    } else {
+        snprintf(app->last_cmd, sizeof(app->last_cmd), "Listening...");
+        FURI_LOG_I(
+            TAG,
+            "C2 client ready at %lu.%03lu MHz",
+            (unsigned long)(app->frequency / 1000000UL),
+            (unsigned long)((app->frequency % 1000000UL) / 1000UL));
+    }
+
+    /* 500 ms periodic refresh so counters/state update without button presses */
+    app->refresh_timer = furi_timer_alloc(refresh_timer_cb, FuriTimerTypePeriodic, app);
+    furi_timer_start(app->refresh_timer, 500);
+
     /* Run until back button pressed */
     view_dispatcher_run(app->view_dispatcher);
 
     /* Cleanup */
+    furi_timer_stop(app->refresh_timer);
+    furi_timer_free(app->refresh_timer);
+
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdStatus);
     view_free(app->status_view);
     view_dispatcher_free(app->view_dispatcher);
@@ -758,7 +833,9 @@ int32_t c2_client_app(void* p) {
         furi_hal_bt_extra_beacon_stop();
     }
 
-    stop_radio(app);
+    if(app->radio_active) {
+        stop_radio(app);
+    }
 
     furi_record_close(RECORD_GUI);
     furi_record_close(RECORD_NOTIFICATION);
