@@ -325,6 +325,7 @@ def run_ollama_auto(
     model: str,
     console: Console,
     mock: bool,
+    ollama_timeout: int = 180,
 ) -> None:
     """Drive the scenario using Ollama as the autonomous agent."""
 
@@ -386,7 +387,7 @@ def run_ollama_auto(
 
     messages = [{"role": "user", "content": system_prompt}]
     console.print(Rule("[bold dim]Autonomous Ollama Agent[/bold dim]", style="dim"))
-    console.print(f"[dim]Model: {model}  |  Endpoint: {ollama_url}[/dim]\n")
+    console.print(f"[dim]Model: {model}  |  Endpoint: {ollama_url}  |  Timeout: {ollama_timeout}s[/dim]\n")
 
     for turn in range(10):
         payload = {
@@ -396,11 +397,12 @@ def run_ollama_auto(
             "stream": False,
         }
         try:
-            resp = requests.post(f"{ollama_url}/api/chat", json=payload, timeout=60)
+            resp = requests.post(f"{ollama_url}/api/chat", json=payload, timeout=ollama_timeout)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
             console.print(f"[red]Ollama error: {exc}[/red]")
+            console.print(f"[yellow]Hint: if this is a timeout, try --ollama-timeout {ollama_timeout * 2} for larger models.[/yellow]")
             break
 
         message = data.get("message", {})
@@ -525,6 +527,9 @@ def main() -> None:
     parser.add_argument("--flipper-port", type=int, default=int(os.environ.get("FLIPPER_PORT", "8080")))
     parser.add_argument("--ollama-url", default=os.environ.get("OLLAMA_URL", "http://192.168.0.167:11434"))
     parser.add_argument("--model", default=os.environ.get("OLLAMA_MODEL", "llama3.2"))
+    parser.add_argument("--ollama-timeout", type=int,
+                        default=int(os.environ.get("OLLAMA_TIMEOUT", "180")),
+                        help="Ollama request timeout in seconds (default: 180; increase for large models)")
     parser.add_argument("--output-dir", default=os.environ.get("OUTPUT_DIR", "./output"))
     parser.add_argument("--no-export", action="store_true", default=False,
                         help="Skip SVG/PNG export (print to terminal only)")
@@ -548,6 +553,7 @@ def main() -> None:
             model=args.model,
             console=console,
             mock=args.mock,
+            ollama_timeout=args.ollama_timeout,
         )
         make_footer(console)
     elif args.live:
