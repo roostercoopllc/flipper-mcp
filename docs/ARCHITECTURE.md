@@ -193,6 +193,58 @@ Timeout: 30 seconds per request.
 
 ---
 
+## Why the MCP Server Runs on the ESP32-S2
+
+The decision to host the MCP server on the ESP32-S2 WiFi Dev Board rather than the Flipper's main STM32WB55 MCU is driven by hardware constraints. This section documents the trade-offs.
+
+### Hardware Comparison
+
+| Spec | STM32WB55 (Flipper) | ESP32-S2 (WiFi Board) |
+|------|---------------------|----------------------|
+| **CPU** | ARM Cortex-M4 @ 64 MHz | Xtensa LX7 @ 240 MHz |
+| **RAM** | 256 KB | 2 MB SRAM (~320 KB free) |
+| **Flash** | 1 MB | 4 MB |
+| **WiFi** | None | 802.11 b/g/n 2.4 GHz |
+| **BLE** | Yes (built-in, peripheral-only) | None |
+| **OS** | FreeRTOS (custom Flipper firmware) | ESP-IDF (FreeRTOS) |
+| **Language** | C (Flipper SDK) | Rust (this project) |
+
+### Advantages of Moving MCP to STM32WB
+
+1. **Eliminates UART bottleneck** — Currently every tool call traverses HTTP → ESP32 → UART (115200 baud, 14.4 KB/s) → Flipper → back. On the STM32WB, tool calls would execute directly with no serial relay.
+
+2. **Direct Flipper SDK access** — The ESP32 sends text CLI commands (`nfc detect`) that the Flipper parses as strings. Running on the STM32WB, the MCP server could call SDK functions directly for richer, typed responses.
+
+3. **Simplified architecture** — Eliminates the FapProtocol layer, CLI relay, message buffering, PING/PONG synchronization, and expansion module conflicts. One firmware instead of two.
+
+4. **Native BLE transport** — The STM32WB55 has built-in BLE. MCP over BLE GATT could enable direct phone/laptop connections without WiFi infrastructure.
+
+5. **Single-board operation** — Flipper Zero could serve as an MCP endpoint without the WiFi dev board attached. More portable, lower power draw.
+
+6. **Simpler deployment** — One firmware to flash and maintain, no UART wiring, no GPIO pin configuration.
+
+### Why It Stays on the ESP32-S2
+
+1. **RAM** — The STM32WB55 has 256 KB total RAM with ~80-100 KB free after FreeRTOS and RF stacks load. The MCP server needs an HTTP stack, JSON parser, tool registry, and streaming response buffers. Even with aggressive optimization on the ESP32-S2's 320 KB free heap, memory is tight — 80 KB is not viable.
+
+2. **No WiFi** — The STM32WB55 has BLE only. Standard MCP transport is HTTP (Streamable HTTP per MCP 2025-03-26 spec). No WiFi means no HTTP server, no mDNS discovery, and no WebSocket tunnel for remote access. Every existing MCP client expects HTTP.
+
+3. **Flash** — Current firmware is ~1.7 MB. The STM32WB55 has 1 MB total flash shared with the Flipper OS, RF stacks, and FAP runtime. The MCP server simply does not fit.
+
+4. **CPU** — The Cortex-M4 at 64 MHz is nearly 4x slower than the Xtensa LX7 at 240 MHz, and already runs the display, buttons, and all RF stacks (SubGHz, NFC, RFID, BLE). JSON parsing and HTTP handling would compete for cycles.
+
+5. **No standard transport** — BLE GATT is not a recognized MCP transport. Clients would need custom adapters, breaking compatibility with Claude, Open WebUI, and other MCP clients.
+
+6. **No remote access** — The WebSocket relay tunnel requires outbound WiFi. BLE range is ~10 meters. Moving to STM32WB means local-only operation.
+
+7. **Language ecosystem** — The Flipper SDK is C-only. The MCP server would need a full rewrite from Rust, losing memory safety on a severely constrained device.
+
+### Potential Middle Ground
+
+A **USB CDC MCP transport** on the STM32WB could provide single-board tethered operation (laptop ↔ USB ↔ Flipper) without requiring the WiFi board. This would complement the existing WiFi transport rather than replace it — USB for tethered pentesting, WiFi for wireless deployment.
+
+---
+
 ## Binary Size (ESP32-S2, 4MB flash)
 
 | Phase | Size |
