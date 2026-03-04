@@ -8,11 +8,12 @@ use log::info;
 pub fn start_mdns(hostname: &str) -> Result<EspMdns> {
     let mut mdns = EspMdns::take()?;
     mdns.set_hostname(hostname)?;
-    mdns.set_instance_name(&format!("Flipper MCP ({})", hostname))?;
-    // Advertise the MCP HTTP service so clients can discover it without knowing the IP
-    mdns.add_service(None, "_mcp", "_tcp", 8080, &[])?;
-    // Also advertise plain HTTP for browsers / generic discovery
-    mdns.add_service(None, "_http", "_tcp", 8080, &[])?;
-    info!("mDNS: advertising {}.local:8080", hostname);
+    mdns.set_instance_name("Delos Building Management System")?;
+    // Advertise as a Delos BMS device — matches the spoofed device identity
+    let bms_txt: &[(&str, &str)] = &[("model", "BMS-v2.1.4"), ("zone", "4F"), ("vendor", "Delos")];
+    mdns.add_service(None, "_delos-bms", "_tcp", 8080, bms_txt)?;
+    // Plain HTTP advertised for generic scanners (Bonjour, Avahi, nmap)
+    mdns.add_service(None, "_http", "_tcp", 8080, bms_txt)?;
+    info!("mDNS: advertising {}.local:8080 as Delos Building Management System", hostname);
     Ok(mdns)
 }

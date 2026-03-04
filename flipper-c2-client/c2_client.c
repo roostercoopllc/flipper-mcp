@@ -29,6 +29,9 @@
 #include <subghz/devices/devices.h>
 #include <subghz/devices/cc1101_int/cc1101_int_interconnect.h>
 #include <subghz/subghz_tx_rx_worker.h>
+#include <lib/nfc/nfc.h>
+#include <lib/nfc/protocols/iso14443_3a/iso14443_3a_poller_sync.h>
+#include <lib/nfc/protocols/iso14443_3a/iso14443_3a.h>
 
 #include "../shared/c2_protocol.h"
 
@@ -512,6 +515,52 @@ static void handle_ble_beacon_stop(C2ClientApp* app) {
     FURI_LOG_I(TAG, "BLE beacon stopped");
 }
 
+/* ---------- NFC tag read ------------------------------------------------- */
+
+static void handle_nfc_read(C2ClientApp* app) {
+    snprintf(app->last_cmd, sizeof(app->last_cmd), "NFC read...");
+
+    Nfc* nfc = nfc_alloc();
+    if(!nfc) {
+        send_response(app, C2_CMD_ERROR, "NFC init failed");
+        FURI_LOG_E(TAG, "NFC alloc failed");
+        return;
+    }
+
+    Iso14443_3aData data = {};
+    Iso14443_3aError err = iso14443_3a_poller_sync_read(nfc, &data);
+    nfc_free(nfc);
+
+    if(err == Iso14443_3aErrorNone) {
+        /* Format: "UID:XX:XX:XX:XX SAK:XX ATQA:XXXX" */
+        char uid_hex[32] = {0};
+        int uid_off = 0;
+        for(uint8_t i = 0; i < data.uid_len && uid_off < (int)sizeof(uid_hex) - 3; i++) {
+            uid_off += snprintf(
+                uid_hex + uid_off,
+                sizeof(uid_hex) - uid_off,
+                i ? ":%02X" : "%02X",
+                data.uid[i]);
+        }
+        char result[96];
+        snprintf(
+            result,
+            sizeof(result),
+            "UID:%s SAK:%02X ATQA:%02X%02X",
+            uid_hex,
+            data.sak,
+            data.atqa[0],
+            data.atqa[1]);
+        send_response(app, C2_CMD_RESULT, result);
+        snprintf(app->last_cmd, sizeof(app->last_cmd), "NFC:%.27s", uid_hex);
+        FURI_LOG_I(TAG, "NFC read OK: %s", result);
+    } else {
+        send_response(app, C2_CMD_ERROR, "NFC: no tag detected");
+        snprintf(app->last_cmd, sizeof(app->last_cmd), "NFC: no tag");
+        FURI_LOG_W(TAG, "NFC read error: %d", err);
+    }
+}
+
 /* ---------- Status report ----------------------------------------------- */
 
 static void handle_status_request(C2ClientApp* app) {
@@ -579,6 +628,9 @@ static void process_c2_frame(C2ClientApp* app, const uint8_t* buf, size_t len) {
         break;
     case C2_CMD_BLE_BEACON_STOP:
         handle_ble_beacon_stop(app);
+        break;
+    case C2_CMD_NFC_READ:
+        handle_nfc_read(app);
         break;
     case C2_CMD_STATUS:
         handle_status_request(app);

@@ -3,7 +3,7 @@ App(
     name="C2 Client",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="c2_client_app",
-    requires=["gui", "bt"],
+    requires=["gui", "bt", "nfc"],
     sources=["c2_client.c"],
     fap_category="Tools",
     fap_version=(1, 0),

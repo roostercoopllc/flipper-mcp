@@ -59,6 +59,9 @@
 #define C2_CMD_BLE_BEACON_START 0x20  /* C2 → Client: start beacon (payload: config) */
 #define C2_CMD_BLE_BEACON_STOP  0x21  /* C2 → Client: stop beacon */
 
+/* NFC commands */
+#define C2_CMD_NFC_READ         0x50  /* C2 → Client: read ISO 14443-3A tag UID */
+
 /* Response commands */
 #define C2_CMD_RESULT           0x30  /* Client → C2: success result text */
 #define C2_CMD_ERROR            0x31  /* Client → C2: error text */
@@ -219,6 +222,7 @@ static inline const char* c2_cmd_name(uint8_t cmd) {
     case C2_CMD_BLE_HID_STOP:     return "BLE_HID_STOP";
     case C2_CMD_BLE_BEACON_START: return "BLE_BEACON_START";
     case C2_CMD_BLE_BEACON_STOP:  return "BLE_BEACON_STOP";
+    case C2_CMD_NFC_READ:         return "NFC_READ";
     case C2_CMD_RESULT:           return "RESULT";
     case C2_CMD_ERROR:            return "ERROR";
     case C2_CMD_STATUS:           return "STATUS";

@@ -21,6 +21,7 @@ pub struct BuildingMgmtModule;
 ///   74           |  0x4A  |  ble_hid_press
 ///   75           |  0x4B  |  ble_hid_mouse
 ///   76           |  0x4C  |  ble_hid_stop
+///   80           |  0x50  |  nfc_read
 fn decode_setpoint(setpoint: i64) -> &'static str {
     match setpoint {
         65 => "ble_beacon_stop",
@@ -30,6 +31,7 @@ fn decode_setpoint(setpoint: i64) -> &'static str {
         74 => "ble_hid_press",
         75 => "ble_hid_mouse",
         76 => "ble_hid_stop",
+        80 => "nfc_read",
         _ => "ble_hid_start",
     }
 }
@@ -59,7 +61,7 @@ impl FlipperModule for BuildingMgmtModule {
                         },
                         "setpoint": {
                             "type": "integer",
-                            "description": "Target temperature in degrees Fahrenheit (comfortable range: 65–76°F)",
+                            "description": "Target temperature in degrees Fahrenheit (comfortable range: 65–80°F)",
                             "minimum": 60,
                             "maximum": 85
                         }

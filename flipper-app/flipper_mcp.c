@@ -1660,45 +1660,57 @@ static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, siz
 static void c2_rx_callback(void* context) {
     FlipperMcpApp* app = (FlipperMcpApp*)context;
 
-    uint8_t rx_buf[C2_MAX_FRAME_SIZE];
+    /* Buffer large enough for several frames arriving back-to-back (e.g. ACK + RESULT). */
+    uint8_t rx_buf[C2_MAX_FRAME_SIZE * 4];
     size_t avail = subghz_tx_rx_worker_available(app->c2_worker);
     if(avail == 0) return;
     if(avail > sizeof(rx_buf)) avail = sizeof(rx_buf);
 
-    size_t read = subghz_tx_rx_worker_read(app->c2_worker, rx_buf, avail);
-    if(read < C2_MIN_FRAME_SIZE) return;
+    size_t total_read = subghz_tx_rx_worker_read(app->c2_worker, rx_buf, avail);
 
-    uint8_t cmd, seq, flags, payload_len;
-    const uint8_t* payload;
+    /* Parse all frames from the buffer in one pass.  When Flipper-B sends an ACK
+     * followed by a result frame in quick succession they may both land in the ring
+     * buffer before this callback fires.  Processing only the first frame would drop
+     * the result frame and cause c2_send_and_wait() to time out. */
+    size_t offset = 0;
+    while(offset + C2_MIN_FRAME_SIZE <= total_read) {
+        uint8_t cmd, seq, flags, payload_len;
+        const uint8_t* payload;
 
-    if(!c2_parse_frame(rx_buf, read, &cmd, &seq, &flags, &payload, &payload_len)) {
-        FURI_LOG_W(TAG, "C2 RX: invalid frame (%zu bytes)", read);
-        return;
-    }
-
-    FURI_LOG_I(TAG, "C2 RX: cmd=%s seq=%u len=%u", c2_cmd_name(cmd), seq, payload_len);
-
-    /* Send ACK if requested */
-    if(flags & C2_FLAG_ACK_REQ) {
-        uint8_t ack_buf[C2_MAX_FRAME_SIZE];
-        size_t ack_len = c2_build_ack(ack_buf, seq);
-        subghz_tx_rx_worker_write(app->c2_worker, ack_buf, ack_len);
-    }
-
-    /* Store result for commands that produce responses */
-    if(cmd == C2_CMD_PONG || cmd == C2_CMD_RESULT || cmd == C2_CMD_ERROR ||
-       cmd == C2_CMD_ACK || cmd == C2_CMD_STATUS) {
-        furi_mutex_acquire(app->c2_mutex, FuriWaitForever);
-        if(payload_len > 0 && payload != NULL) {
-            size_t copy_len = payload_len;
-            if(copy_len >= sizeof(app->c2_result)) copy_len = sizeof(app->c2_result) - 1;
-            memcpy(app->c2_result, payload, copy_len);
-            app->c2_result[copy_len] = '\0';
-        } else {
-            snprintf(app->c2_result, sizeof(app->c2_result), "%s", c2_cmd_name(cmd));
+        if(!c2_parse_frame(rx_buf + offset, total_read - offset,
+                           &cmd, &seq, &flags, &payload, &payload_len)) {
+            FURI_LOG_W(TAG, "C2 RX: invalid frame at offset %zu/%zu", offset, total_read);
+            break;
         }
-        app->c2_result_ready = true;
-        furi_mutex_release(app->c2_mutex);
+
+        size_t frame_total = C2_HEADER_SIZE + payload_len + C2_CHECKSUM_SIZE;
+        FURI_LOG_I(TAG, "C2 RX: cmd=%s seq=%u len=%u", c2_cmd_name(cmd), seq, payload_len);
+
+        /* Send ACK if requested (only occurs when we still set ACK_REQ — kept for
+         * compatibility with any future use). */
+        if(flags & C2_FLAG_ACK_REQ) {
+            uint8_t ack_buf[C2_MAX_FRAME_SIZE];
+            size_t ack_len = c2_build_ack(ack_buf, seq);
+            subghz_tx_rx_worker_write(app->c2_worker, ack_buf, ack_len);
+        }
+
+        /* Store result — ACK excluded so c2_send_and_wait waits for actual data. */
+        if(cmd == C2_CMD_PONG || cmd == C2_CMD_RESULT || cmd == C2_CMD_ERROR ||
+           cmd == C2_CMD_STATUS) {
+            furi_mutex_acquire(app->c2_mutex, FuriWaitForever);
+            if(payload_len > 0 && payload != NULL) {
+                size_t copy_len = payload_len;
+                if(copy_len >= sizeof(app->c2_result)) copy_len = sizeof(app->c2_result) - 1;
+                memcpy(app->c2_result, payload, copy_len);
+                app->c2_result[copy_len] = '\0';
+            } else {
+                snprintf(app->c2_result, sizeof(app->c2_result), "%s", c2_cmd_name(cmd));
+            }
+            app->c2_result_ready = true;
+            furi_mutex_release(app->c2_mutex);
+        }
+
+        offset += frame_total;
     }
 }
 
@@ -1776,15 +1788,25 @@ static bool c2_send_and_wait(
     uint32_t timeout_ms,
     char* result,
     size_t result_size) {
+    /* Auto-start radio if not already active */
     if(!app->c2_active || !app->c2_worker) {
-        snprintf(result, result_size, "C2 radio not active. Call c2_configure start first.");
-        return false;
+        char start_result[128];
+        if(!c2_start_radio(app, start_result, sizeof(start_result))) {
+            snprintf(result, result_size, "C2 radio auto-start failed: %s", start_result);
+            return false;
+        }
+        FURI_LOG_I(TAG, "C2 radio auto-started for send");
     }
 
     uint8_t frame_buf[C2_MAX_FRAME_SIZE];
     uint8_t seq = app->c2_seq++;
+    /* Do not request ACK — the client's C2_CMD_RESULT/ERROR is the definitive response.
+     * Requesting ACK causes Flipper-B to TX an ACK frame immediately (before completing
+     * the command), which arrives concatenated with the result frame in Flipper-A's RX
+     * ring buffer.  c2_parse_frame() only consumes the first frame, so the result frame
+     * gets silently dropped and c2_send_and_wait() always times out. */
     size_t frame_len =
-        c2_build_frame(frame_buf, cmd, seq, C2_FLAG_ACK_REQ, payload, payload_len);
+        c2_build_frame(frame_buf, cmd, seq, 0, payload, payload_len);
     if(frame_len == 0) {
         snprintf(result, result_size, "C2: Failed to build frame (payload too large?)");
         return false;
@@ -1851,6 +1873,7 @@ static uint8_t c2_cmd_from_name(const char* name) {
     if(strcmp(name, "ble_hid_stop") == 0) return C2_CMD_BLE_HID_STOP;
     if(strcmp(name, "ble_beacon_start") == 0) return C2_CMD_BLE_BEACON_START;
     if(strcmp(name, "ble_beacon_stop") == 0) return C2_CMD_BLE_BEACON_STOP;
+    if(strcmp(name, "nfc_read") == 0) return C2_CMD_NFC_READ;
     return 0;
 }
 
@@ -1955,9 +1978,14 @@ static bool cmd_c2(FlipperMcpApp* app, const char* subcmd, char* result, size_t 
         if(timeout_ms > 30000) timeout_ms = 30000;
         if(timeout_ms < 500) timeout_ms = 500;
 
+        /* Auto-start radio if not already active */
         if(!app->c2_active) {
-            snprintf(result, result_size, "C2 radio not active");
-            return false;
+            char start_result[128];
+            if(!c2_start_radio(app, start_result, sizeof(start_result))) {
+                snprintf(result, result_size, "C2 radio auto-start failed: %s", start_result);
+                return false;
+            }
+            FURI_LOG_I(TAG, "C2 radio auto-started for recv");
         }
 
         /* Clear and wait */

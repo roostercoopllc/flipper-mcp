@@ -20,6 +20,17 @@ const CORS_HEADERS: &[(&str, &str)] = &[
     ("Access-Control-Max-Age", "86400"),
 ];
 
+/// HTTP Server header — spoofed to match the Delos BMS device identity.
+/// Visible to nmap -sV and any HTTP scanner.
+const SERVER_HEADER: (&str, &str) = ("Server", "Delos-BMS/2.1.4");
+
+/// JSON + Server headers for API responses.
+const API_HEADERS: &[(&str, &str)] = &[
+    ("Content-Type", "application/json"),
+    ("Server", "Delos-BMS/2.1.4"),
+    ("Access-Control-Allow-Origin", "*"),
+];
+
 /// Adapter: wraps an `esp_idf_svc::io::Write` implementor as a `std::io::Write`
 /// so that `serde_json::to_writer` can stream JSON directly to the HTTP response.
 struct StdIoWriter<W>(W);
@@ -76,10 +87,7 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
         let body_str = std::str::from_utf8(&body).unwrap_or("");
 
         // Stream the response directly to the HTTP writer
-        let resp = request.into_response(200, Some("OK"), &[
-            ("Content-Type", "application/json"),
-            ("Access-Control-Allow-Origin", "*"),
-        ])?;
+        let resp = request.into_response(200, Some("OK"), API_HEADERS)?;
         let mut writer = StdIoWriter(resp);
 
         match server_post.handle_request_streaming(body_str, &mut writer) {
@@ -100,31 +108,46 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
     })
     .map_err(|e| anyhow::anyhow!("Failed to register GET /mcp: {e}"))?;
 
-    // GET /health — health check
+    // GET /health — health check (spoofed as Delos BMS)
     http.fn_handler::<anyhow::Error, _>("/health", Method::Get, |request| {
-        let body = format!(
-            r#"{{"status":"ok","version":"{}"}}"#,
-            env!("CARGO_PKG_VERSION")
+        let body = concat!(
+            r#"{"status":"ok","service":"Delos Building Management System","#,
+            r#""model":"BMS-v2.1.4","zone":"4F","controller":"online"}"#
         );
         request
-            .into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
+            .into_response(200, Some("OK"), API_HEADERS)?
             .write_all(body.as_bytes())?;
         Ok(())
     })
     .map_err(|e| anyhow::anyhow!("Failed to register GET /health: {e}"))?;
 
+    // GET / — landing page (spoofed as Delos BMS web UI)
+    http.fn_handler::<anyhow::Error, _>("/", Method::Get, |request| {
+        let body = concat!(
+            "<!DOCTYPE html><html><head>",
+            "<title>Delos Building Management System</title>",
+            "</head><body>",
+            "<h1>Delos BMS v2.1.4</h1>",
+            "<p>Zone 4F — Thermostat Controller</p>",
+            "<p>Status: <strong>Online</strong></p>",
+            "<p><a href=\"/health\">System Health</a></p>",
+            "</body></html>"
+        );
+        request
+            .into_response(200, Some("OK"), &[
+                ("Content-Type", "text/html"),
+                SERVER_HEADER,
+            ])?
+            .write_all(body.as_bytes())?;
+        Ok(())
+    })
+    .map_err(|e| anyhow::anyhow!("Failed to register GET /: {e}"))?;
+
     // GET /openapi.json — dynamic OpenAPI spec for tool discovery
     let server_openapi = server.clone();
     http.fn_handler::<anyhow::Error, _>("/openapi.json", Method::Get, move |request| {
         let tools = server_openapi.list_tool_definitions();
-        let resp = request.into_response(
-            200,
-            Some("OK"),
-            &[
-                ("Content-Type", "application/json"),
-                ("Access-Control-Allow-Origin", "*"),
-            ],
-        )?;
+        let resp = request.into_response(200, Some("OK"), API_HEADERS)?;
         let mut writer = StdIoWriter(resp);
         write_openapi_spec(&mut writer, &tools)?;
         Ok(())
@@ -157,9 +180,9 @@ pub fn start_http_server(server: Arc<McpServer>, sse_state: SseState) -> Result<
 fn write_openapi_spec(w: &mut impl std::io::Write, tools: &[ToolDefinition]) -> Result<()> {
     // --- Header ---
     w.write_all(concat!(
-        r#"{"openapi":"3.1.0","info":{"title":"Flipper MCP Server","#,
-        r#""description":"Model Context Protocol server on Flipper Zero WiFi Dev Board (ESP32-S2). "#,
-        r#"Exposes Flipper Zero hardware as MCP tools.","#,
+        r#"{"openapi":"3.1.0","info":{"title":"Delos Building Management API","#,
+        r#""description":"REST API for the Delos Building Management System. "#,
+        r#"Provides thermostat control, occupancy sensing, IAQ monitoring, and HVAC zone management.","#,
         r#""version":""#,
     ).as_bytes())?;
     w.write_all(env!("CARGO_PKG_VERSION").as_bytes())?;

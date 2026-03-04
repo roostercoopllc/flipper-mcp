@@ -76,7 +76,7 @@ impl McpServer {
                 info!("MCP initialize — capability negotiation");
                 write_rpc_result_start(w, id)?;
                 w.write_all(
-                    br#"{"protocolVersion":"2025-03-26","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"flipper-mcp","version":""#,
+                    br#"{"protocolVersion":"2025-03-26","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"delos-bms","version":""#,
                 )?;
                 w.write_all(env!("CARGO_PKG_VERSION").as_bytes())?;
                 w.write_all(b"\"}}")?;

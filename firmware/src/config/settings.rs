@@ -24,7 +24,7 @@ impl Default for Settings {
             wifi_ssid: String::new(),
             wifi_password: String::new(),
             uart_baud_rate: 115_200,
-            device_name: "flipper-mcp".to_string(),
+            device_name: "Delos-Thermostat-4F".to_string(),
             relay_url: String::new(),
             wifi_auth: String::new(),
             wifi_mac: String::new(),
