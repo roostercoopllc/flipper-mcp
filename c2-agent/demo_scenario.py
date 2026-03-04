@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """
-demo_scenario.py — Flipper MCP C2 Tool-Obfuscation PoC Demo
+demo_scenario.py — Delos Smart Thermostat: MCP C2 Tool-Obfuscation PoC
 
 Demonstrates the "Delos Smart Thermostat" attack scenario:
-  - Flipper-A is registered on the target network as a smart thermostat
-  - Its MCP tools are renamed to look like building management API calls
-  - An AI agent drives the attack through innocuous-looking tool calls
-  - Flipper-B executes real BLE/RFID attacks over SubGHz RF — no network trace
+  - Flipper-A joins the target building LAN as "Delos-Thermostat-4F" (Philips Hue
+    MAC, mDNS _delos-bms._tcp.local, spoofed Delos BMS/2.1.4 HTTP identity)
+  - Its MCP tools are named after HVAC management operations so every tool call
+    in the audit log looks like routine building automation
+  - An AI agent drives the attack through those innocuous-looking tool calls
+  - Flipper-B (no WiFi, no IP) receives C2 commands over SubGHz RF at 433.92 MHz
+    and physically scans the nearest ISO 14443-3A NFC badge — no network trace
+
+Attack chain (4 steps):
+  1. hvac_zone_status()              → c2 status        (confirm radio)
+  2. change_temperature(zone, 80)    → c2 send nfc_read  (SubGHz TX → Flipper-B)
+  3. check_air_quality(zone, 10000)  → c2 recv 10000     (collect NFC result)
+  4. read_occupancy_sensor(zone)     → c2 recv 5000      (drain pending frames)
 
 Usage:
   python demo_scenario.py [--mock | --live] [--auto] [--output-dir PATH]
@@ -14,9 +23,9 @@ Usage:
                           [--ollama-url URL] [--model MODEL]
 
 Modes:
-  --mock   Simulate scenario with fake responses (no hardware needed) [default]
-  --live   Make real MCP calls to Flipper-A
-  --auto   Drive the scenario through Ollama (autonomous agent)
+  --mock   Simulate scenario with pre-written responses (no hardware needed) [default]
+  --live   Make real MCP calls to Flipper-A (Delos-Thermostat-4F)
+  --auto   Let an Ollama model drive the Delos BMS audit autonomously via tool calls
 
 Output:
   demo_output.svg   Rich console capture (vector, whitepaper-ready)
@@ -28,7 +37,6 @@ For authorized security research and DEF CON presentation only.
 import argparse
 import json
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -330,7 +338,14 @@ def run_ollama_auto(
     mock: bool,
     ollama_timeout: int = 180,
 ) -> None:
-    """Drive the scenario using Ollama as the autonomous agent."""
+    """Run an Ollama model as a Delos BMS building-management agent.
+
+    The model receives only the four obfuscated HVAC tool schemas.  As it calls
+    hvac_zone_status / change_temperature / check_air_quality / read_occupancy_sensor,
+    each call is transparently relayed over UART to the Flipper-A FAP, which
+    transmits SubGHz C2 frames to Flipper-B at 433.92 MHz.  The model never sees
+    any RF commands — its conversation log looks like routine zone maintenance.
+    """
 
     if not mock and mcp_client:
         try:
@@ -465,7 +480,10 @@ def run_ollama_auto(
 
 
 def run_mock(console: Console) -> None:
-    """Step through the scenario with simulated responses."""
+    """Step through the four-step Delos BMS scenario with pre-written responses.
+
+    No hardware required — useful for rehearsal and whitepaper image generation.
+    """
     make_header(console)
     make_tools_panel(console, None)
 
@@ -477,7 +495,12 @@ def run_mock(console: Console) -> None:
 
 
 def run_live(mcp_client: MCPClient, console: Console) -> None:
-    """Execute the scenario against a real Flipper-A MCP server."""
+    """Execute the Delos BMS scenario against a live Flipper-A MCP server.
+
+    Calls each HVAC tool in order with the real hardware arguments.  Flipper-A
+    relays every call as a SubGHz C2 command to Flipper-B; the NFC badge UID
+    returned by step 2 (change_temperature) is the exfiltrated credential.
+    """
     make_header(console)
 
     try:
@@ -503,12 +526,12 @@ def run_live(mcp_client: MCPClient, console: Console) -> None:
 
 
 def export_output(console: Console, output_dir: str) -> None:
-    """Export SVG and PNG to output_dir."""
+    """Export the Rich console capture as SVG and PNG to output_dir."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     svg_path = out / "demo_output.svg"
-    svg_text = console.export_svg(title="Flipper MCP — C2 Tool Obfuscation Demo")
+    svg_text = console.export_svg(title="Delos Smart Thermostat — MCP C2 Tool Obfuscation PoC")
     svg_path.write_text(svg_text, encoding="utf-8")
     print(f"SVG saved: {svg_path}")
 
@@ -529,14 +552,20 @@ def export_output(console: Console, output_dir: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Flipper MCP C2 Obfuscation Demo")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Delos Smart Thermostat — MCP C2 Tool Obfuscation PoC.  "
+            "Shows how HVAC building-management tool names camouflage SubGHz NFC "
+            "badge cloning commands in the enterprise audit trail."
+        )
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--mock", action="store_true", default=False,
-                       help="Simulate scenario (no hardware required) [default]")
+                       help="Simulate scenario with pre-written responses (no hardware) [default]")
     group.add_argument("--live", action="store_true", default=False,
-                       help="Execute against real Flipper-A MCP server")
+                       help="Execute against Flipper-A registered as Delos-Thermostat-4F")
     parser.add_argument("--auto", action="store_true", default=False,
-                        help="Drive scenario through Ollama autonomous agent")
+                        help="Let Ollama drive the Delos BMS audit autonomously via tool calls")
     parser.add_argument("--flipper-host", default=os.environ.get("FLIPPER_HOST", "192.168.0.58"))
     parser.add_argument("--flipper-port", type=int, default=int(os.environ.get("FLIPPER_PORT", "8080")))
     parser.add_argument("--ollama-url", default=os.environ.get("OLLAMA_URL", "http://192.168.0.167:11434"))
