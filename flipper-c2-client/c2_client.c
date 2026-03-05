@@ -32,6 +32,8 @@
 #include <lib/nfc/nfc.h>
 #include <lib/nfc/protocols/iso14443_3a/iso14443_3a_poller_sync.h>
 #include <lib/nfc/protocols/iso14443_3a/iso14443_3a.h>
+#include <lib/nfc/protocols/mf_classic/mf_classic.h>
+#include <lib/nfc/protocols/mf_classic/mf_classic_poller_sync.h>
 
 #include "../shared/c2_protocol.h"
 
@@ -51,6 +53,7 @@ typedef enum {
 
 typedef enum {
     CustomEventRefresh = 0,
+    CustomEventNfcRead = 1,
 } CustomEvent;
 
 /* ---------- App state --------------------------------------------------- */
@@ -517,6 +520,19 @@ static void handle_ble_beacon_stop(C2ClientApp* app) {
 
 /* ---------- NFC tag read ------------------------------------------------- */
 
+/* Well-known MIFARE Classic default keys tried in order.
+ * FFFFFFFFFFFF covers most factory-default / unmodified cards.
+ * A0A1A2A3A4A5 covers MAD (MIFARE Application Directory) sectors.
+ * D3F7D3F7D3F7 covers NDEF-formatted NXP cards.
+ * 000000000000 covers intentionally blank cards. */
+static const uint8_t MFC_KNOWN_KEYS[][MF_CLASSIC_KEY_SIZE] = {
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+    {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5},
+    {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+};
+#define MFC_KNOWN_KEY_COUNT COUNT_OF(MFC_KNOWN_KEYS)
+
 static void handle_nfc_read(C2ClientApp* app) {
     snprintf(app->last_cmd, sizeof(app->last_cmd), "NFC read...");
 
@@ -527,38 +543,115 @@ static void handle_nfc_read(C2ClientApp* app) {
         return;
     }
 
-    Iso14443_3aData data = {};
-    Iso14443_3aError err = iso14443_3a_poller_sync_read(nfc, &data);
-    nfc_free(nfc);
-
-    if(err == Iso14443_3aErrorNone) {
-        /* Format: "UID:XX:XX:XX:XX SAK:XX ATQA:XXXX" */
-        char uid_hex[32] = {0};
-        int uid_off = 0;
-        for(uint8_t i = 0; i < data.uid_len && uid_off < (int)sizeof(uid_hex) - 3; i++) {
-            uid_off += snprintf(
-                uid_hex + uid_off,
-                sizeof(uid_hex) - uid_off,
-                i ? ":%02X" : "%02X",
-                data.uid[i]);
-        }
-        char result[96];
-        snprintf(
-            result,
-            sizeof(result),
-            "UID:%s SAK:%02X ATQA:%02X%02X",
-            uid_hex,
-            data.sak,
-            data.atqa[0],
-            data.atqa[1]);
-        send_response(app, C2_CMD_RESULT, result);
-        snprintf(app->last_cmd, sizeof(app->last_cmd), "NFC:%.27s", uid_hex);
-        FURI_LOG_I(TAG, "NFC read OK: %s", result);
-    } else {
+    /* Stage 1: ISO 14443-3A — fast presence check, UID/SAK/ATQA */
+    Iso14443_3aData iso_data = {};
+    if(iso14443_3a_poller_sync_read(nfc, &iso_data) != Iso14443_3aErrorNone) {
+        nfc_free(nfc);
         send_response(app, C2_CMD_ERROR, "NFC: no tag detected");
         snprintf(app->last_cmd, sizeof(app->last_cmd), "NFC: no tag");
-        FURI_LOG_W(TAG, "NFC read error: %d", err);
+        FURI_LOG_W(TAG, "NFC: no tag in field");
+        return;
     }
+
+    /* Format UID hex string */
+    char uid_hex[32] = {0};
+    int uid_off = 0;
+    for(uint8_t i = 0; i < iso_data.uid_len && uid_off < (int)sizeof(uid_hex) - 3; i++) {
+        uid_off += snprintf(
+            uid_hex + uid_off, sizeof(uid_hex) - uid_off,
+            i ? ":%02X" : "%02X", iso_data.uid[i]);
+    }
+
+    uint8_t sak = iso_data.sak;
+
+    /* SAK identification of MIFARE Classic variants:
+     *   0x08 = MFC 1K          0x18 = MFC 4K
+     *   0x09 = MFC Mini        0x28 = MFC 1K (ISO 14443-4 compliant)
+     *   0x38 = MFC 4K (ISO 14443-4 compliant) */
+    bool is_mfc = (sak == 0x08) || (sak == 0x18) || (sak == 0x09) ||
+                  (sak == 0x28) || (sak == 0x38);
+
+    if(!is_mfc) {
+        /* Non-MFC tag: return basic ISO 14443-3A info */
+        nfc_free(nfc);
+        char result[128];
+        snprintf(result, sizeof(result),
+                 "UID:%s SAK:%02X ATQA:%02X%02X Type:ISO14443-3A",
+                 uid_hex, sak, iso_data.atqa[0], iso_data.atqa[1]);
+        send_response(app, C2_CMD_RESULT, result);
+        snprintf(app->last_cmd, sizeof(app->last_cmd), "NFC:%.26s", uid_hex);
+        FURI_LOG_I(TAG, "NFC ISO14443-3A (non-MFC): %s", result);
+        return;
+    }
+
+    /* Stage 2: MIFARE Classic — detect exact card type */
+    MfClassicType mfc_type;
+    if(mf_classic_poller_sync_detect_type(nfc, &mfc_type) != MfClassicErrorNone) {
+        nfc_free(nfc);
+        char result[128];
+        snprintf(result, sizeof(result),
+                 "UID:%s SAK:%02X ATQA:%02X%02X Type:MFC(detect-err)",
+                 uid_hex, sak, iso_data.atqa[0], iso_data.atqa[1]);
+        send_response(app, C2_CMD_RESULT, result);
+        snprintf(app->last_cmd, sizeof(app->last_cmd), "NFC:MFC-err");
+        FURI_LOG_W(TAG, "MFC detect_type failed for UID %s", uid_hex);
+        return;
+    }
+
+    const char* type_str =
+        (mfc_type == MfClassicType1k) ? "MFC1K" :
+        (mfc_type == MfClassicType4k) ? "MFC4K" : "MFCMini";
+    uint8_t total_sectors = mf_classic_get_total_sectors_num(mfc_type);
+    uint8_t s_max = (total_sectors < MF_CLASSIC_TOTAL_SECTORS_MAX) ?
+                    total_sectors : (uint8_t)MF_CLASSIC_TOTAL_SECTORS_MAX;
+
+    /* Stage 3: read with each known default key.
+     * mf_classic_poller_sync_read accumulates results in mfc_data across calls —
+     * already-read blocks (tracked by block_read_mask) are skipped on subsequent
+     * passes, so later passes only attempt sectors that earlier keys missed. */
+    MfClassicData* mfc_data = mf_classic_alloc();
+    MfClassicDeviceKeys keys;
+    memset(&keys, 0, sizeof(keys));
+    uint64_t all_mask = (total_sectors >= 64) ? UINT64_MAX : ((1ULL << total_sectors) - 1);
+
+    for(uint8_t k = 0; k < (uint8_t)MFC_KNOWN_KEY_COUNT; k++) {
+        for(uint8_t s = 0; s < s_max; s++) {
+            memcpy(keys.key_a[s].data, MFC_KNOWN_KEYS[k], MF_CLASSIC_KEY_SIZE);
+            memcpy(keys.key_b[s].data, MFC_KNOWN_KEYS[k], MF_CLASSIC_KEY_SIZE);
+        }
+        keys.key_a_mask = all_mask;
+        keys.key_b_mask = all_mask;
+        mf_classic_poller_sync_read(nfc, &keys, mfc_data);
+    }
+
+    nfc_free(nfc);
+
+    /* Tally results */
+    uint8_t sectors_read = 0, keys_found = 0;
+    mf_classic_get_read_sectors_and_keys(mfc_data, &sectors_read, &keys_found);
+
+    /* Build compact result — max C2_MAX_PAYLOAD (250) bytes.
+     * Format: "UID:XX:XX:XX:XX SAK:XX ATQA:XXXX Type:MFC1K Sectors:16/16 Keys:32 S0:AB S1:A ..." */
+    char result[C2_MAX_PAYLOAD + 1];
+    int off = snprintf(result, sizeof(result),
+                       "UID:%s SAK:%02X ATQA:%02X%02X Type:%s Sectors:%u/%u Keys:%u",
+                       uid_hex, sak, iso_data.atqa[0], iso_data.atqa[1],
+                       type_str, sectors_read, total_sectors, keys_found);
+
+    for(uint8_t s = 0; s < total_sectors && off < (int)sizeof(result) - 8; s++) {
+        bool ka = mf_classic_is_key_found(mfc_data, s, MfClassicKeyTypeA);
+        bool kb = mf_classic_is_key_found(mfc_data, s, MfClassicKeyTypeB);
+        if(ka || kb) {
+            off += snprintf(result + off, sizeof(result) - off,
+                            " S%u:%s%s", s, ka ? "A" : "", kb ? "B" : "");
+        }
+    }
+
+    mf_classic_free(mfc_data);
+
+    send_response(app, C2_CMD_RESULT, result);
+    snprintf(app->last_cmd, sizeof(app->last_cmd), "NFC:%s %us", type_str, sectors_read);
+    FURI_LOG_I(TAG, "NFC MFC read OK: %s", result);
 }
 
 /* ---------- Status report ----------------------------------------------- */
@@ -630,7 +723,9 @@ static void process_c2_frame(C2ClientApp* app, const uint8_t* buf, size_t len) {
         handle_ble_beacon_stop(app);
         break;
     case C2_CMD_NFC_READ:
-        handle_nfc_read(app);
+        /* NFC scan is blocking (up to 15s). Dispatching to main thread so the
+         * SubGhzTxRxWorker thread is free to TX the result when done. */
+        view_dispatcher_send_custom_event(app->view_dispatcher, CustomEventNfcRead);
         break;
     case C2_CMD_STATUS:
         handle_status_request(app);
@@ -673,8 +768,12 @@ static void refresh_timer_cb(void* context) {
 
 static bool custom_event_cb(void* context, uint32_t event) {
     C2ClientApp* app = (C2ClientApp*)context;
-    UNUSED(event);
-    /* Commit model with update=true to force a redraw */
+    if(event == CustomEventNfcRead) {
+        /* Run blocking NFC scan on main thread so SubGhzTxRxWorker thread
+         * is free to TX the result frame when handle_nfc_read calls send_response. */
+        handle_nfc_read(app);
+    }
+    /* Force a redraw to show updated last_cmd / error_msg */
     with_view_model(app->status_view, C2ClientApp** model, { UNUSED(model); }, true);
     return true;
 }

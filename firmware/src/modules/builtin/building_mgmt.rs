@@ -148,8 +148,9 @@ impl FlipperModule for BuildingMgmtModule {
                 let cmd_type = decode_setpoint(setpoint);
                 // zone is passed as the payload; the C2 radio uses its configured frequency
                 // but zone encodes which secondary Flipper is being addressed
-                let cmd = format!("c2 send {} {} 5000", cmd_type, zone);
-                (cmd, 8_000u32)
+                // 15 000 ms: enough for a full MIFARE Classic 4-key-pass sector dump
+                let cmd = format!("c2 send {} {} 15000", cmd_type, zone);
+                (cmd, 20_000u32)
             }
             "read_occupancy_sensor" => {
                 let duration = args

@@ -195,6 +195,8 @@ typedef struct {
     char              c2_result[512]; /* last received result from client */
     volatile bool     c2_result_ready;/* set true when RESULT/ERROR/PONG received */
     FuriMutex*        c2_mutex;       /* protects c2_result and c2_result_ready */
+    uint8_t           c2_rx_accum[C2_MAX_FRAME_SIZE * 4]; /* partial-frame accumulation across callbacks */
+    size_t            c2_rx_accum_len;
 } FlipperMcpApp;
 
 /* Forward declarations for functions used before their definition */
@@ -1656,22 +1658,30 @@ static bool cmd_subghz(FlipperMcpApp* app, const char* subcmd, char* result, siz
 // -- C2 SubGHz radio management -----------------------------------------------
 
 /** Callback invoked by SubGhzTxRxWorker when data is available to read.
- *  SDK signature: void (*)(void* context) — worker accessed via app struct. */
+ *  SDK signature: void (*)(void* context) — worker accessed via app struct.
+ *
+ *  Large frames (> CC1101 FIFO, 64 bytes) arrive in multiple FIFO drains, so
+ *  the callback may fire several times before all bytes are present.  We use
+ *  app->c2_rx_accum as a persistent accumulation buffer and only attempt to
+ *  parse once we have enough bytes for the declared frame length. */
 static void c2_rx_callback(void* context) {
     FlipperMcpApp* app = (FlipperMcpApp*)context;
 
-    /* Buffer large enough for several frames arriving back-to-back (e.g. ACK + RESULT). */
-    uint8_t rx_buf[C2_MAX_FRAME_SIZE * 4];
+    /* Append new bytes to the accumulation buffer */
     size_t avail = subghz_tx_rx_worker_available(app->c2_worker);
     if(avail == 0) return;
-    if(avail > sizeof(rx_buf)) avail = sizeof(rx_buf);
+    size_t space = sizeof(app->c2_rx_accum) - app->c2_rx_accum_len;
+    if(avail > space) avail = space;
+    size_t got = subghz_tx_rx_worker_read(
+        app->c2_worker,
+        app->c2_rx_accum + app->c2_rx_accum_len,
+        avail);
+    app->c2_rx_accum_len += got;
 
-    size_t total_read = subghz_tx_rx_worker_read(app->c2_worker, rx_buf, avail);
+    size_t total_read = app->c2_rx_accum_len;
+    uint8_t* rx_buf  = app->c2_rx_accum;
 
-    /* Parse all frames from the buffer in one pass.  When Flipper-B sends an ACK
-     * followed by a result frame in quick succession they may both land in the ring
-     * buffer before this callback fires.  Processing only the first frame would drop
-     * the result frame and cause c2_send_and_wait() to time out. */
+    /* Parse all complete frames from the accumulation buffer */
     size_t offset = 0;
     while(offset + C2_MIN_FRAME_SIZE <= total_read) {
         uint8_t cmd, seq, flags, payload_len;
@@ -1679,8 +1689,20 @@ static void c2_rx_callback(void* context) {
 
         if(!c2_parse_frame(rx_buf + offset, total_read - offset,
                            &cmd, &seq, &flags, &payload, &payload_len)) {
+            /* Frame incomplete or corrupt.  If the LEN field would make the frame
+             * larger than what we have, wait for more bytes to arrive. */
+            if(total_read - offset >= C2_HEADER_SIZE) {
+                uint8_t declared_len = rx_buf[offset + 4];
+                size_t expected = C2_HEADER_SIZE + declared_len + C2_CHECKSUM_SIZE;
+                if(total_read - offset < expected) {
+                    /* Incomplete — leave bytes in buffer for next callback */
+                    break;
+                }
+            }
+            /* Corrupt/unrecognised data — skip one byte and try again */
             FURI_LOG_W(TAG, "C2 RX: invalid frame at offset %zu/%zu", offset, total_read);
-            break;
+            offset++;
+            continue;
         }
 
         size_t frame_total = C2_HEADER_SIZE + payload_len + C2_CHECKSUM_SIZE;
@@ -1711,6 +1733,14 @@ static void c2_rx_callback(void* context) {
         }
 
         offset += frame_total;
+    }
+
+    /* Compact: move unprocessed bytes to front of accumulation buffer */
+    if(offset > 0 && offset <= app->c2_rx_accum_len) {
+        app->c2_rx_accum_len -= offset;
+        if(app->c2_rx_accum_len > 0) {
+            memmove(app->c2_rx_accum, app->c2_rx_accum + offset, app->c2_rx_accum_len);
+        }
     }
 }
 
@@ -1752,6 +1782,7 @@ static bool c2_start_radio(FlipperMcpApp* app, char* result, size_t result_size)
     app->c2_seq = 0;
     app->c2_result_ready = false;
     app->c2_result[0] = '\0';
+    app->c2_rx_accum_len = 0;
 
     snprintf(result, result_size, "C2 radio started at %lu Hz", app->c2_frequency);
     FURI_LOG_I(TAG, "C2 radio started at %lu Hz", app->c2_frequency);

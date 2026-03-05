@@ -60,7 +60,15 @@
 #define C2_CMD_BLE_BEACON_STOP  0x21  /* C2 → Client: stop beacon */
 
 /* NFC commands */
-#define C2_CMD_NFC_READ         0x50  /* C2 → Client: read ISO 14443-3A tag UID */
+/* C2 → Client: scan nearest NFC tag.
+ * Client performs:
+ *   1. ISO 14443-3A read (UID / SAK / ATQA)
+ *   2. MIFARE Classic type detect (if SAK indicates MFC)
+ *   3. Sector dump with known default keys (FFFFFFFFFFFF, A0A1A2A3A4A5,
+ *      D3F7D3F7D3F7, 000000000000) — up to 4 passes, results accumulated
+ * Response payload (C2_CMD_RESULT, max 250 B):
+ *   "UID:XX:XX:XX:XX SAK:XX ATQA:XXXX Type:MFC1K Sectors:N/16 Keys:N S0:AB ..." */
+#define C2_CMD_NFC_READ         0x50
 
 /* Response commands */
 #define C2_CMD_RESULT           0x30  /* Client → C2: success result text */
