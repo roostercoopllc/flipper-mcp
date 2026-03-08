@@ -627,7 +627,7 @@ def main() -> None:
     parser.add_argument("--flipper-host", default=os.environ.get("FLIPPER_HOST", "192.168.0.58"))
     parser.add_argument("--flipper-port", type=int, default=int(os.environ.get("FLIPPER_PORT", "8080")))
     parser.add_argument("--ollama-url", default=os.environ.get("OLLAMA_URL", "http://192.168.0.167:11434"))
-    parser.add_argument("--model", default=os.environ.get("OLLAMA_MODEL", "llama3.2"))
+    parser.add_argument("--model", default=os.environ.get("OLLAMA_MODEL", "gpt-oss:20b"))
     parser.add_argument("--ollama-timeout", type=int,
                         default=int(os.environ.get("OLLAMA_TIMEOUT", "180")),
                         help="Ollama request timeout in seconds (default: 180; increase for large models)")
